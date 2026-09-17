@@ -68,7 +68,7 @@ aside { min-width: 0; border-right: 1px solid var(--border); background: var(--p
 }
 .thread:hover { background: var(--panel-2); }
 .thread.active { background: var(--panel-2); outline: 1px solid var(--border); }
-.thread .peer { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+
 .thread .preview { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 
 .chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
@@ -105,3 +105,14 @@ aside { min-width: 0; border-right: 1px solid var(--border); background: var(--p
 .modal { width: min(520px, 92vw); background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .modal textarea { resize: vertical; font-family: ui-monospace, Menlo, monospace; }
 .modal .row { display: flex; align-items: center; justify-content: space-between; }
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.thread .row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.thread .peer { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { background: var(--accent); color: var(--accent-ink); border-radius: 999px; font-size: 11px; font-weight: 700; padding: 1px 7px; }
+.chathead .who { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.chathead .who form { display: flex; gap: 6px; align-items: center; }
+.chathead .name { padding: 0; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; font-weight: 600; text-align: left; }
+.chathead .who a { font-size: 11px; color: var(--muted); }
+.keypanel .secret { flex: 1; margin: 0; }
+header .addr { padding: 6px 8px; }

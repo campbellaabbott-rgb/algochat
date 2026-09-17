@@ -1,7 +1,7 @@
 import algosdk from 'algosdk'
 import { MAX_NOTE_BYTES, MIN_BALANCE, algodFor, indexerFor, type NetId } from './config'
-import { PREFIX, PREFIX_KEY, decodeNote, encodeEncrypted, encodeKey, encodePlain, type Payload } from './protocol'
-import { encrypt, type EncKeys } from './crypto'
+import { PREFIX, PREFIX_KEY, decodeChunk, decodeNote, encodeChunks, encodeEncrypted, encodeKey, encodePlain, joinChunks, type Payload } from './protocol'
+import { b64, encrypt, type EncKeys } from './crypto'
 
 export type ChainMessage = {
   id: string
@@ -10,6 +10,7 @@ export type ChainMessage = {
   round: bigint
   time: number // unix seconds
   payload: Payload
+  txCount: number // >1 for a chunked long message
 }
 
 type Signer = (txns: algosdk.Transaction[], indexes: number[]) => Promise<Uint8Array[]>
@@ -18,6 +19,8 @@ type Signer = (txns: algosdk.Transaction[], indexes: number[]) => Promise<Uint8A
 export async function fetchMessages(net: NetId, addr: string, minRound?: bigint): Promise<ChainMessage[]> {
   const indexer = indexerFor(net)
   const out: ChainMessage[] = []
+  type Part = { i: number; bytes: Uint8Array }
+  const groups = new Map<string, { n: number; parts: Part[]; head: Omit<ChainMessage, 'payload' | 'txCount'> }>()
   let next: string | undefined
   do {
     let q = indexer
@@ -32,12 +35,27 @@ export async function fetchMessages(net: NetId, addr: string, minRound?: bigint)
     for (const t of res.transactions) {
       const to = t.paymentTransaction?.receiver
       if (!to) continue
+      const head = { id: t.id ?? '', from: t.sender, to, round: t.confirmedRound ?? 0n, time: t.roundTime ?? 0 }
+      const chunk = decodeChunk(t.note)
+      if (chunk && t.group) {
+        const key = b64.enc(t.group)
+        const g = groups.get(key) ?? { n: chunk.n, parts: [], head }
+        g.parts.push({ i: chunk.i, bytes: chunk.bytes })
+        if (chunk.i === 0) g.head = head
+        groups.set(key, g)
+        continue
+      }
       const payload = decodeNote(t.note)
       if (!payload || payload.kind === 'key') continue
-      out.push({ id: t.id ?? '', from: t.sender, to, round: t.confirmedRound ?? 0n, time: t.roundTime ?? 0, payload })
+      out.push({ ...head, payload, txCount: 1 })
     }
     next = res.nextToken
   } while (next)
+  for (const g of groups.values()) {
+    if (g.parts.length !== g.n) continue // partial group: never happens on-chain, skip defensively
+    const payload = decodeNote(joinChunks(g.parts.sort((a, b) => a.i - b.i).map((p) => p.bytes)))
+    if (payload && payload.kind !== 'key') out.push({ ...g.head, payload, txCount: g.n })
+  }
   out.sort((a, b) => (a.round === b.round ? 0 : a.round < b.round ? -1 : 1))
   return out
 }
@@ -73,14 +91,25 @@ export async function isFunded(net: NetId, addr: string): Promise<boolean> {
 }
 
 async function sendNote(net: NetId, from: string, to: string, note: Uint8Array, signer: Signer): Promise<string> {
-  if (note.length > MAX_NOTE_BYTES) throw new Error(`Message too long (${note.length} of ${MAX_NOTE_BYTES} bytes)`)
+  const chunks = encodeChunks(note, MAX_NOTE_BYTES) // throws if over the group budget
   const algod = algodFor(net)
   const suggestedParams = await algod.getTransactionParams().do()
-  const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({ sender: from, receiver: to, amount: 0, note, suggestedParams })
-  const [signed] = await signer([txn], [0])
+  const txns = chunks.map((n) => algosdk.makePaymentTxnWithSuggestedParamsFromObject({ sender: from, receiver: to, amount: 0, note: n, suggestedParams }))
+  if (txns.length > 1) algosdk.assignGroupID(txns)
+  const signed = await signer(txns, txns.map((_, i) => i))
   const { txid } = await algod.sendRawTransaction(signed).do()
   await algosdk.waitForConfirmation(algod, txid, 8)
   return txid
+}
+
+/** How a note would ship: transaction count and total fee in microalgos. */
+export function shippingCost(noteBytes: number): { txns: number; feeMicro: number } | null {
+  try {
+    const txns = encodeChunks(new Uint8Array(noteBytes), MAX_NOTE_BYTES).length
+    return { txns, feeMicro: txns * 1000 }
+  } catch {
+    return null
+  }
 }
 
 export function publishKey(net: NetId, addr: string, keys: EncKeys, signer: Signer) {

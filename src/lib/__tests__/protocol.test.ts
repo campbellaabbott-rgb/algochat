@@ -75,3 +75,34 @@ describe('key storage', () => {
     expect(() => importSecret('mainnet', 'ADDR', 'AAAA')).toThrow()
   })
 })
+
+describe('long messages', () => {
+  it('splits a big note into ≤16 chunks that join back exactly', async () => {
+    const { decodeChunk, encodeChunks, joinChunks } = await import('../protocol')
+    const note = encodePlain('é'.repeat(3000)) // multi-byte, 6008 bytes
+    const chunks = encodeChunks(note, 1024)
+    expect(chunks.length).toBe(6)
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(1024)
+    const parsed = chunks.map(decodeChunk)
+    expect(parsed.map((p) => p!.i)).toEqual([0, 1, 2, 3, 4, 5])
+    expect(parsed.every((p) => p!.n === 6)).toBe(true)
+    const joined = joinChunks(parsed.map((p) => p!.bytes))
+    expect(decodeNote(joined)).toEqual({ kind: 'plain', text: 'é'.repeat(3000) })
+    expect(encodeChunks(new Uint8Array(500), 1024)).toHaveLength(1)
+    expect(() => encodeChunks(new Uint8Array(20_000), 1024)).toThrow(/too long/)
+    expect(decodeChunk(encodePlain('amsg1:x:not a chunk'))).toBeNull()
+  })
+})
+
+describe('key derivation', () => {
+  it('is deterministic per seed and distinct across seeds', async () => {
+    const { deriveKeys } = await import('../crypto')
+    const seed = nacl.randomBytes(64)
+    expect(deriveKeys(seed).publicKey).toEqual(deriveKeys(new Uint8Array(seed)).publicKey)
+    expect(deriveKeys(seed).publicKey).not.toEqual(deriveKeys(nacl.randomBytes(64)).publicKey)
+    // and the derived key actually works as a box key
+    const a = deriveKeys(seed), b = nacl.box.keyPair()
+    const { nonce, box } = encrypt('hi', b.publicKey, a)
+    expect(decrypt(box, nonce, a.publicKey, b)).toBe('hi')
+  })
+})

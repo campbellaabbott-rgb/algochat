@@ -1,101 +1,185 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import algosdk from 'algosdk'
-import { NetworkId } from '@txnlab/use-wallet'
+import { NetworkId, ScopeType } from '@txnlab/use-wallet'
 import { useNetwork, useWallet } from '@txnlab/use-wallet-react'
 import { NETWORKS, asNetId } from './lib/config'
-import { buildMessageNote, fetchMessages, fetchPublishedKey, friendlyError, publishKey, sendMessage, type ChainMessage } from './lib/chain'
-import { decrypt, ensureKeys, exportSecret, importSecret, samePub, type EncKeys } from './lib/crypto'
-import { MAX_NOTE_BYTES } from './lib/config'
-import { answerMnemonic, useMnemonicPromptOpen } from './lib/mnemonicPrompt'
+import { buildMessageNote, fetchPublishedKey, friendlyError, publishKey, sendMessage, type ChainMessage } from './lib/chain'
+import {
+  decrypt,
+  deriveKeys,
+  ensureKeys,
+  importSecret,
+  keyDerivationMessage,
+  keySource,
+  loadKeys,
+  samePub,
+  storeKeys,
+  type EncKeys,
+  type KeySource,
+} from './lib/crypto'
+import { isNfdName, loadNicknames, resolveNfd, reverseNfd, saveNickname } from './lib/names'
+import { useMnemonicPromptOpen } from './lib/mnemonicPrompt'
+import { useMailbox } from './hooks/useMailbox'
+import { MnemonicModal } from './components/MnemonicModal'
+import { KeyPanel } from './components/KeyPanel'
+import { Thread, type Rendered } from './components/Thread'
 
-const POLL_MS = 6000
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`
 const sentCacheKey = (id: string) => `algochat:sent:${id}`
+const readKey = (net: string, me: string) => `algochat:read:${net}:${me}`
 
-type Thread = { peer: string; messages: ChainMessage[]; last: number }
+type ThreadSummary = { peer: string; messages: ChainMessage[]; last: number; unread: number }
 
 export default function App() {
-  const { activeNetwork, setActiveNetwork } = useNetwork()
-  const { wallets, activeAddress, activeWallet, transactionSigner, isReady } = useWallet()
+  const { activeNetwork, activeNetworkConfig, setActiveNetwork } = useNetwork()
+  const { wallets, activeAddress, activeWallet, transactionSigner, signData, withPrivateKey, isReady } = useWallet()
   const net = asNetId(activeNetwork)
   const me = activeAddress
 
   const [keys, setKeys] = useState<EncKeys | null>(null)
+  const [source, setSource] = useState<KeySource>('local')
   const [publishedKey, setPublishedKey] = useState<Uint8Array | null | undefined>(undefined)
-  const [messages, setMessages] = useState<ChainMessage[]>([])
-  const [pending, setPending] = useState<ChainMessage[]>([])
   const [peerKeys, setPeerKeys] = useState<Record<string, Uint8Array | null>>({})
   const [selected, setSelected] = useState<string | null>(null)
   const [newPeer, setNewPeer] = useState('')
-  const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showKeys, setShowKeys] = useState(false)
-  const [loading, setLoading] = useState(false)
+  const [nicks, setNicks] = useState<Record<string, string>>({})
+  const [nfd, setNfd] = useState<Record<string, string>>({})
+  const [lastRead, setLastRead] = useState<Record<string, string>>({})
+  const [notify, setNotify] = useState(() => typeof Notification !== 'undefined' && Notification.permission === 'granted')
+  const [visible, setVisible] = useState(!document.hidden)
   const mnemonicOpen = useMnemonicPromptOpen()
 
-  // Local encryption keypair per (network, address).
   useEffect(() => {
+    const f = () => setVisible(!document.hidden)
+    document.addEventListener('visibilitychange', f)
+    return () => document.removeEventListener('visibilitychange', f)
+  }, [])
+
+  const name = useCallback((addr: string) => nicks[addr] || nfd[addr] || short(addr), [nicks, nfd])
+
+  const render = useCallback(
+    (m: ChainMessage): Rendered => {
+      const cached = localStorage.getItem(sentCacheKey(m.id))
+      if (cached !== null) return { text: cached, locked: false }
+      if (m.payload.kind === 'plain') return { text: m.payload.text, locked: false }
+      if (m.payload.kind === 'enc' && keys) {
+        // Incoming: open with the sender's key from the note. Outgoing: the
+        // recipient's current published key (fails if they've rotated since).
+        const theirPub = m.from === me ? peerKeys[m.to] : m.payload.senderPub
+        if (theirPub) {
+          const text = decrypt(m.payload.box, m.payload.nonce, theirPub, keys)
+          if (text !== null) return { text, locked: false }
+        }
+      }
+      return { text: 'Encrypted — cannot decrypt with this device’s key', locked: true }
+    },
+    [keys, me, peerKeys],
+  )
+
+  const onNew = useCallback(
+    (incoming: ChainMessage[]) => {
+      if (!notify || typeof Notification === 'undefined') return
+      for (const m of incoming) {
+        if (visible && m.from === selected) continue
+        new Notification(name(m.from), { body: render(m).text.slice(0, 120), tag: m.id })
+      }
+    },
+    [notify, visible, selected, name, render],
+  )
+
+  const mailbox = useMailbox(net, me, onNew)
+
+  // Per-account local state: encryption key, nicknames, read markers.
+  useEffect(() => {
+    setPeerKeys({})
+    setSelected(null)
+    setPublishedKey(undefined)
     if (!me) {
       setKeys(null)
-      setPublishedKey(undefined)
+      setNicks({})
+      setLastRead({})
       return
     }
-    setKeys(ensureKeys(net, me))
-    setPublishedKey(undefined)
-    setPeerKeys({})
+    setNicks(loadNicknames(net, me))
+    try {
+      setLastRead(JSON.parse(localStorage.getItem(readKey(net, me)) ?? '{}'))
+    } catch {
+      setLastRead({})
+    }
     fetchPublishedKey(net, me).then(setPublishedKey).catch(() => setPublishedKey(null))
+
+    const stored = loadKeys(net, me)
+    if (stored) {
+      setKeys(stored)
+      setSource(keySource(net, me))
+    } else if (activeWallet?.canUsePrivateKey) {
+      // Mnemonic-style wallets: derive silently, no prompt involved.
+      withPrivateKey(async (sk) => new Uint8Array(sk.subarray(0, 32)))
+        .then((seed) => {
+          const k = deriveKeys(seed)
+          seed.fill(0)
+          storeKeys(net, me, k, 'wallet')
+          setKeys(k)
+          setSource('wallet')
+        })
+        .catch(() => {
+          setKeys(ensureKeys(net, me))
+          setSource('local')
+        })
+    } else {
+      setKeys(ensureKeys(net, me))
+      setSource('local')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [net, me])
 
-  // Poll the indexer for the whole mailbox. Messages are immutable, so a full
-  // refetch is fine at this scale; swap to minRound once a mailbox is large.
-  const refresh = useCallback(async () => {
-    if (!me) return
-    try {
-      const msgs = await fetchMessages(net, me)
-      setMessages(msgs)
-      // A peer can publish a key at any time; keep the open thread's current.
-      if (selected) {
-        const k = await fetchPublishedKey(net, selected).catch(() => undefined)
-        if (k !== undefined) setPeerKeys((p) => ({ ...p, [selected]: k }))
-      }
-      setPending((p) => p.filter((x) => !msgs.some((m) => m.id === x.id)))
-      setError((e) => (e?.startsWith('Indexer') ? null : e))
-    } catch (e) {
-      setError(`Indexer unreachable: ${(e as Error).message}`)
-    }
-  }, [net, me, selected])
-
-  useEffect(() => {
-    if (!me) {
-      setMessages([])
-      setPending([])
-      setSelected(null)
-      return
-    }
-    setLoading(true)
-    refresh().finally(() => setLoading(false))
-    const t = setInterval(refresh, POLL_MS)
-    return () => clearInterval(t)
-  }, [me, refresh])
-
-  const threads = useMemo<Thread[]>(() => {
+  const threads = useMemo<ThreadSummary[]>(() => {
     if (!me) return []
     const byPeer = new Map<string, ChainMessage[]>()
-    for (const m of [...messages, ...pending]) {
+    for (const m of [...mailbox.messages, ...mailbox.pending]) {
       const peer = m.from === me ? m.to : m.from
       if (!byPeer.has(peer)) byPeer.set(peer, [])
       byPeer.get(peer)!.push(m)
     }
     return [...byPeer.entries()]
-      .map(([peer, ms]) => ({ peer, messages: ms, last: ms[ms.length - 1]?.time ?? 0 }))
+      .map(([peer, ms]) => {
+        ms.sort((a, b) => (a.round === b.round ? a.time - b.time : a.round < b.round ? -1 : 1))
+        const readUpTo = BigInt(lastRead[peer] ?? '0')
+        const unread = ms.filter((m) => m.from === peer && m.round > readUpTo).length
+        return { peer, messages: ms, last: ms[ms.length - 1]?.time ?? 0, unread }
+      })
       .sort((a, b) => b.last - a.last)
-  }, [messages, pending, me])
+  }, [mailbox.messages, mailbox.pending, me, lastRead])
 
-  // Resolve the selected peer's published key (cached per session).
+  const totalUnread = threads.reduce((s, t) => s + t.unread, 0)
+  useEffect(() => {
+    document.title = totalUnread ? `(${totalUnread}) AlgoChat` : 'AlgoChat'
+  }, [totalUnread])
+
+  // Opening a thread marks it read; messages that arrive while it is open are
+  // marked read only if the page is actually visible.
+  const lastSelected = useRef<string | null>(null)
+  useEffect(() => {
+    if (!me || !selected) return
+    const justOpened = lastSelected.current !== selected
+    lastSelected.current = selected
+    if (!justOpened && !visible) return
+    const t = threads.find((x) => x.peer === selected)
+    if (!t?.unread) return
+    const top = t.messages.reduce((m, x) => (x.round > m ? x.round : m), 0n)
+    setLastRead((prev) => {
+      const next = { ...prev, [selected]: top.toString() }
+      localStorage.setItem(readKey(net, me), JSON.stringify(next))
+      return next
+    })
+  }, [me, net, selected, visible, threads])
+
   const loadPeerKey = useCallback(
-    async (peer: string) => {
-      if (peer in peerKeys) return peerKeys[peer]
+    async (peer: string, force = false) => {
+      if (!force && peer in peerKeys) return peerKeys[peer]
       const k = await fetchPublishedKey(net, peer).catch(() => null)
       setPeerKeys((p) => ({ ...p, [peer]: k }))
       return k
@@ -103,88 +187,102 @@ export default function App() {
     [net, peerKeys],
   )
 
-  useEffect(() => {
-    if (selected) void loadPeerKey(selected)
-  }, [selected, loadPeerKey])
-
-  // Fetch keys for every peer in the thread list so incoming messages decrypt.
+  // Keys for every peer (so outgoing history decrypts) and a fresh look at the
+  // open thread's key on each poll — a peer can publish at any time.
   useEffect(() => {
     for (const t of threads) if (!(t.peer in peerKeys)) void loadPeerKey(t.peer)
   }, [threads, peerKeys, loadPeerKey])
-
-  const bottomRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' })
-  }, [selected, threads])
+    if (!selected) return
+    void loadPeerKey(selected, true)
+    const t = setInterval(() => void loadPeerKey(selected, true), 15000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, net])
+
+  // Reverse-resolve .algo names for everyone in the sidebar.
+  useEffect(() => {
+    const addrs = [...threads.map((t) => t.peer), ...(me ? [me] : [])].filter((a) => !(a in nfd))
+    if (!addrs.length) return
+    reverseNfd(net, addrs).then((found) => setNfd((p) => ({ ...p, ...Object.fromEntries(addrs.map((a) => [a, found[a] ?? ''])) })))
+  }, [threads, me, net, nfd])
 
   const needsPublish = keys && publishedKey !== undefined && (!publishedKey || !samePub(publishedKey, keys.publicKey))
 
-  async function onPublishKey() {
-    if (!me || !keys) return
-    setBusy('Publishing your encryption key…')
+  async function run<T>(label: string, f: () => Promise<T>): Promise<T> {
+    setBusy(label)
     setError(null)
     try {
-      await publishKey(net, me, keys, transactionSigner)
-      setPublishedKey(keys.publicKey)
+      return await f()
     } catch (e) {
       setError(friendlyError(e))
+      throw e
     } finally {
       setBusy(null)
     }
   }
 
-  const peerPub = selected ? (peerKeys[selected] ?? null) : null
-  const noteBytes = useMemo(() => (keys && draft ? buildMessageNote(draft, keys, peerPub).length : 0), [draft, keys, peerPub])
+  const onPublishKey = () =>
+    run('Publishing your encryption key…', async () => {
+      if (!me || !keys) return
+      await publishKey(net, me, keys, transactionSigner)
+      setPublishedKey(keys.publicKey)
+    }).catch(() => {})
 
-  async function onSend() {
-    if (!me || !keys || !selected || !draft.trim()) return
-    const text = draft.trim()
-    setBusy('Waiting for signature…')
-    setError(null)
-    try {
-      const theirPub = await loadPeerKey(selected)
+  const onDeriveFromWallet = () =>
+    run('Waiting for the wallet to sign the key-derivation message…', async () => {
+      if (!me) return
+      const chainId = activeNetworkConfig.caipChainId ?? `algorand:${net}`
+      const payload = btoa(JSON.stringify(keyDerivationMessage(me, chainId)))
+      const res = await signData(payload, { scope: ScopeType.AUTH, encoding: 'base64' })
+      const k = deriveKeys(res.signature)
+      storeKeys(net, me, k, 'wallet')
+      setKeys(k)
+      setSource('wallet')
+      setPublishedKey((p) => (p && samePub(p, k.publicKey) ? p : null))
+    }).catch(() => {})
+
+  const noteBytesFor = useCallback(
+    (text: string) => (keys ? buildMessageNote(text, keys, selected ? (peerKeys[selected] ?? null) : null).length : 0),
+    [keys, selected, peerKeys],
+  )
+
+  const onSend = (text: string) =>
+    run('Waiting for signature…', async () => {
+      if (!me || !keys || !selected) return
+      const theirPub = await loadPeerKey(selected, true)
       const note = buildMessageNote(text, keys, theirPub)
       setBusy('Confirming on-chain…')
       const id = await sendMessage(net, me, selected, note, transactionSigner)
       localStorage.setItem(sentCacheKey(id), text)
-      setPending((p) => [
-        ...p,
-        { id, from: me, to: selected, round: 0n, time: Math.floor(Date.now() / 1000), payload: { kind: 'plain', text } },
-      ])
-      setDraft('')
-    } catch (e) {
-      setError(friendlyError(e))
-    } finally {
-      setBusy(null)
-    }
-  }
+      mailbox.addPending({ id, from: me, to: selected, round: 0n, time: Math.floor(Date.now() / 1000), payload: { kind: 'plain', text }, txCount: 1 })
+    })
 
-  function render(m: ChainMessage): { text: string; locked: boolean } {
-    const cached = localStorage.getItem(sentCacheKey(m.id))
-    if (cached !== null) return { text: cached, locked: false }
-    if (m.payload.kind === 'plain') return { text: m.payload.text, locked: false }
-    if (m.payload.kind === 'enc' && keys) {
-      // Incoming: open with the sender's key from the note. Outgoing: the
-      // recipient's current published key (fails if they've rotated since).
-      const theirPub = m.from === me ? peerKeys[m.to] : m.payload.senderPub
-      if (theirPub) {
-        const text = decrypt(m.payload.box, m.payload.nonce, theirPub, keys)
-        if (text !== null) return { text, locked: false }
-      }
+  async function startConversation() {
+    let a = newPeer.trim()
+    if (isNfdName(a)) {
+      const resolved = await run(`Resolving ${a}…`, () => resolveNfd(net, a)).catch(() => null)
+      if (!resolved) return setError(`${a} did not resolve on ${NETWORKS[net].label}`)
+      a = resolved
     }
-    return { text: 'Encrypted — cannot decrypt with this device’s key', locked: true }
-  }
-
-  function startConversation() {
-    const a = newPeer.trim()
-    if (!algosdk.isValidAddress(a)) return setError('That is not a valid Algorand address')
+    if (!algosdk.isValidAddress(a)) return setError('Enter an Algorand address or a .algo name')
     if (a === me) return setError('That is your own address')
     setError(null)
     setSelected(a)
     setNewPeer('')
   }
 
+  async function toggleNotify() {
+    if (typeof Notification === 'undefined') return setError('This browser has no notification support')
+    if (notify) return setNotify(false)
+    const p = await Notification.requestPermission()
+    setNotify(p === 'granted')
+    if (p !== 'granted') setError('Notifications were not allowed')
+  }
+
   const thread = threads.find((t) => t.peer === selected)
+  const peerKeyState = selected ? (selected in peerKeys ? (peerKeys[selected] ? 'ok' : 'none') : 'loading') : 'none'
+  const canDerive = !!activeWallet?.canSignData
 
   return (
     <div className="app">
@@ -202,12 +300,15 @@ export default function App() {
           </select>
           {me ? (
             <>
+              <button className="ghost" onClick={toggleNotify} title={notify ? 'Notifications on' : 'Enable notifications'}>
+                {notify ? '🔔' : '🔕'}
+              </button>
               <button className="ghost" onClick={() => setShowKeys((s) => !s)} title="Encryption key">
                 🔑
               </button>
-              <span className="addr" title={me}>
-                {activeWallet?.metadata.name} · {short(me)}
-              </span>
+              <button className="ghost addr" title={`${me}\nClick to copy`} onClick={() => navigator.clipboard?.writeText(me)}>
+                {activeWallet?.metadata.name} · {name(me)} ⧉
+              </button>
               <button onClick={() => activeWallet?.disconnect()}>Disconnect</button>
             </>
           ) : (
@@ -220,6 +321,7 @@ export default function App() {
         </div>
       </header>
 
+      {mailbox.error && <div className="banner error">{mailbox.error}</div>}
       {error && (
         <div className="banner error" onClick={() => setError(null)}>
           {error}
@@ -230,13 +332,34 @@ export default function App() {
         <div className="banner warn">
           Your encryption key isn’t on-chain yet, so people can only send you plaintext.{' '}
           <button onClick={onPublishKey}>Publish key (0.001 ALGO)</button>
+          {canDerive && source !== 'wallet' && (
+            <>
+              {' '}
+              <button className="ghost" onClick={onDeriveFromWallet}>
+                Derive from wallet first
+              </button>
+            </>
+          )}
         </div>
       )}
 
       {mnemonicOpen && <MnemonicModal />}
 
       {showKeys && me && keys && (
-        <KeyPanel keys={keys} onImport={(b64) => setKeys(importSecret(net, me, b64))} onClose={() => setShowKeys(false)} />
+        <KeyPanel
+          keys={keys}
+          source={source}
+          canDerive={canDerive}
+          onDerive={onDeriveFromWallet}
+          onImport={(b64) => {
+            const k = importSecret(net, me, b64)
+            storeKeys(net, me, k, 'local')
+            setKeys(k)
+            setSource('local')
+            setPublishedKey((p) => (p && samePub(p, k.publicKey) ? p : null))
+          }}
+          onClose={() => setShowKeys(false)}
+        />
       )}
 
       {!me ? (
@@ -262,17 +385,22 @@ export default function App() {
               className="newpeer"
               onSubmit={(e) => {
                 e.preventDefault()
-                startConversation()
+                void startConversation()
               }}
             >
-              <input placeholder="Recipient address…" value={newPeer} onChange={(e) => setNewPeer(e.target.value)} />
-              <button type="submit">New</button>
+              <input placeholder="Address or name.algo…" value={newPeer} onChange={(e) => setNewPeer(e.target.value)} />
+              <button type="submit" disabled={!!busy}>
+                New
+              </button>
             </form>
-            {loading && threads.length === 0 && <div className="muted">Loading mailbox…</div>}
-            {!loading && threads.length === 0 && <div className="muted">No conversations yet.</div>}
+            {mailbox.loading && threads.length === 0 && <div className="muted">Loading mailbox…</div>}
+            {!mailbox.loading && threads.length === 0 && <div className="muted">No conversations yet.</div>}
             {threads.map((t) => (
               <button key={t.peer} className={`thread ${t.peer === selected ? 'active' : ''}`} onClick={() => setSelected(t.peer)}>
-                <div className="peer">{short(t.peer)}</div>
+                <div className="row">
+                  <span className={nicks[t.peer] || nfd[t.peer] ? 'peer' : 'peer mono'}>{name(t.peer)}</span>
+                  {t.unread > 0 && <span className="badge">{t.unread}</span>}
+                </div>
                 <div className="preview">{render(t.messages[t.messages.length - 1]).text}</div>
               </button>
             ))}
@@ -280,143 +408,26 @@ export default function App() {
 
           <section className="chat">
             {!selected ? (
-              <div className="muted center">Pick a conversation or paste an address.</div>
+              <div className="muted center">Pick a conversation, or paste an address or .algo name.</div>
             ) : (
-              <>
-                <div className="chathead">
-                  <a href={`${NETWORKS[net].explorer}/account/${selected}`} target="_blank" rel="noreferrer">
-                    {selected}
-                  </a>
-                  <span className={`pill ${peerPub ? 'ok' : ''}`}>
-                    {selected in peerKeys ? (peerPub ? '🔒 end-to-end encrypted' : '🔓 plaintext — no key published') : '…'}
-                  </span>
-                </div>
-                <div className="messages">
-                  {thread?.messages.map((m) => {
-                    const r = render(m)
-                    const mine = m.from === me
-                    return (
-                      <div key={m.id} className={`msg ${mine ? 'mine' : ''} ${r.locked ? 'locked' : ''}`}>
-                        <div className="body">{r.text}</div>
-                        <div className="meta">
-                          {m.round === 0n ? (
-                            'confirmed · indexing…'
-                          ) : (
-                            <a href={`${NETWORKS[net].explorer}/transaction/${m.id}`} target="_blank" rel="noreferrer">
-                              {new Date(m.time * 1000).toLocaleString()}
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
-                  <div ref={bottomRef} />
-                </div>
-                <form
-                  className="composer"
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    void onSend()
-                  }}
-                >
-                  <textarea
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    placeholder="Message… (Enter to send, Shift+Enter for newline)"
-                    disabled={!!busy}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault()
-                        void onSend()
-                      }
-                    }}
-                  />
-                  <div className="composer-foot">
-                    <span className={`muted ${noteBytes > MAX_NOTE_BYTES ? 'over' : ''}`}>
-                      {noteBytes}/{MAX_NOTE_BYTES} bytes · fee 0.001 ALGO
-                    </span>
-                    <button type="submit" disabled={!!busy || !draft.trim() || noteBytes > MAX_NOTE_BYTES}>
-                      Send
-                    </button>
-                  </div>
-                </form>
-              </>
+              <Thread
+                net={net}
+                me={me}
+                peer={selected}
+                peerName={name(selected)}
+                nickname={nicks[selected]}
+                messages={thread?.messages ?? []}
+                peerKeyState={peerKeyState}
+                render={render}
+                noteBytesFor={noteBytesFor}
+                busy={!!busy}
+                onSend={onSend}
+                onNickname={(n) => setNicks(saveNickname(net, me, selected, n))}
+              />
             )}
           </section>
         </main>
       )}
-    </div>
-  )
-}
-
-function KeyPanel({ keys, onImport, onClose }: { keys: EncKeys; onImport: (b64: string) => void; onClose: () => void }) {
-  const [val, setVal] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  return (
-    <div className="keypanel">
-      <div className="row">
-        <b>Encryption key</b>
-        <button className="ghost" onClick={onClose}>
-          ✕
-        </button>
-      </div>
-      <p className="muted">
-        Your secret key lives only in this browser. Copy it to another device to read your history there; after importing,
-        no republish is needed if the public half matches.
-      </p>
-      <code className="secret">{exportSecret(keys)}</code>
-      <div className="row">
-        <input placeholder="Paste a secret key to import…" value={val} onChange={(e) => setVal(e.target.value)} />
-        <button
-          onClick={() => {
-            try {
-              onImport(val)
-              setVal('')
-              setErr(null)
-            } catch (e) {
-              setErr((e as Error).message)
-            }
-          }}
-        >
-          Import
-        </button>
-      </div>
-      {err && <div className="error-text">{err}</div>}
-    </div>
-  )
-}
-
-function MnemonicModal() {
-  const [val, setVal] = useState('')
-  const words = val.trim().split(/\s+/).filter(Boolean).length
-  return (
-    <div className="modal-backdrop" onClick={() => answerMnemonic(null)}>
-      <form
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => {
-          e.preventDefault()
-          answerMnemonic(val.trim())
-        }}
-      >
-        <b>TestNet mnemonic</b>
-        <p className="muted">
-          Paste a 25-word phrase for a throwaway TestNet account. It is stored in this browser only. Never paste a
-          MainNet key here.
-        </p>
-        <textarea autoFocus value={val} onChange={(e) => setVal(e.target.value)} placeholder="word word word …" rows={4} />
-        <div className="row">
-          <span className="muted">{words}/25 words</span>
-          <span>
-            <button type="button" className="ghost" onClick={() => answerMnemonic(null)}>
-              Cancel
-            </button>{' '}
-            <button type="submit" disabled={words !== 25}>
-              Connect
-            </button>
-          </span>
-        </div>
-      </form>
     </div>
   )
 }

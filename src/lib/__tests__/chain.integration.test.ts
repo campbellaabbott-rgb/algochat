@@ -116,7 +116,24 @@ describe('two funded accounts on the mock chain', () => {
     await expect(sendMessage(NET, A, B, buildMessageNote('x', aliceKeys, null), forged)).rejects.toThrow(/signature is invalid/)
   })
 
-  it('rejects a note over 1024 bytes', async () => {
-    await expect(sendMessage(NET, A, B, new Uint8Array(1025), signerFor(alice))).rejects.toThrow(/too long/)
+  it('ships a long message as one atomic group and reads it back whole', async () => {
+    const bobPub = await fetchPublishedKey(NET, B)
+    const text = 'Lorem ipsum 🚀 '.repeat(300) // ~5.4k chars, ~7 txns encrypted
+    const signer = vi.fn(signerFor(alice))
+    await sendMessage(NET, A, B, buildMessageNote(text, aliceKeys, bobPub), signer)
+    expect(signer).toHaveBeenCalledTimes(1)
+    const [txns, idx] = signer.mock.calls[0]
+    expect(txns.length).toBeGreaterThan(1)
+    expect(idx).toEqual(txns.map((_, i) => i))
+    const inbox = await fetchMessages(NET, B)
+    const m = inbox.find((x) => x.txCount > 1)!
+    expect(m.txCount).toBe(txns.length)
+    expect(m.payload.kind).toBe('enc')
+    if (m.payload.kind !== 'enc') return
+    expect(decrypt(m.payload.box, m.payload.nonce, m.payload.senderPub, bobKeys)).toBe(text)
+  })
+
+  it('rejects a note over the 16-transaction budget', async () => {
+    await expect(sendMessage(NET, A, B, new Uint8Array(20_000), signerFor(alice))).rejects.toThrow(/too long/)
   })
 })

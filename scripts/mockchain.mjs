@@ -16,6 +16,7 @@
 import http from 'node:http'
 import nacl from 'tweetnacl'
 import algosdk from 'algosdk'
+import { decodeMulti } from 'algorand-msgpack'
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => (a.startsWith('--') ? [a.slice(2), all[i + 1]] : [])).filter((x) => x.length))
 const ALGOD_PORT = Number(args.algod ?? 4001)
@@ -35,10 +36,11 @@ const b64 = (u8) => Buffer.from(u8).toString('base64')
 
 for (const a of (args.fund ?? '').split(',').filter(Boolean)) balances.set(a, 10_000_000n)
 
-function apply(rawBytes) {
-  const stxn = algosdk.decodeSignedTransaction(rawBytes)
+/** Validate one signed txn against the current ledger; returns the balance deltas without committing. */
+function check(stxn, deltas) {
   const txn = stxn.txn
   const id = txn.txID()
+  const cur = (a) => bal(a) + (deltas.get(a) ?? 0n)
   if (seen.has(id)) throw new Error(`TransactionPool.Remember: transaction already in ledger: ${id}`)
   if (txn.type !== 'pay') throw new Error(`mockchain only supports pay transactions, got ${txn.type}`)
   if (!stxn.sig) throw new Error('mockchain only supports plain ed25519 signatures')
@@ -47,20 +49,42 @@ function apply(rawBytes) {
   if (!nacl.sign.detached.verify(txn.bytesToSign(), stxn.sig, pk)) throw new Error(`TransactionPool.Remember: transaction ${id}: signature is invalid`)
   if (txn.fee < MIN_FEE) throw new Error(`TransactionPool.Remember: transaction ${id}: fee ${txn.fee} below threshold ${MIN_FEE}`)
   if (round < txn.firstValid || round > txn.lastValid) throw new Error(`TransactionPool.Remember: transaction ${id}: round ${round} outside of ${txn.firstValid}-${txn.lastValid}`)
+  if (txn.note && txn.note.length > 1024) throw new Error(`TransactionPool.Remember: transaction ${id}: note too big: ${txn.note.length} > 1024`)
   const receiver = txn.payment.receiver.toString()
   const amount = txn.payment.amount
   const spend = amount + txn.fee
-  if (bal(sender) < spend) throw new Error(`TransactionPool.Remember: transaction ${id}: overspend (account ${sender}, tried to spend ${spend})`)
-  const senderAfter = bal(sender) - spend
-  if (sender !== receiver && senderAfter > 0n && senderAfter < MIN_BALANCE) throw new Error(`TransactionPool.Remember: transaction ${id}: account ${sender} balance ${senderAfter} below min ${MIN_BALANCE}`)
-  const receiverAfter = sender === receiver ? senderAfter : bal(receiver) + amount
-  if (receiverAfter < MIN_BALANCE) throw new Error(`TransactionPool.Remember: transaction ${id}: account ${receiver} balance ${receiverAfter} below min ${MIN_BALANCE}`)
-  balances.set(sender, senderAfter)
-  if (sender !== receiver) balances.set(receiver, receiverAfter)
-  round += 1n
-  seen.add(id)
-  txns.push({ id, round, time: Math.floor(Date.now() / 1000), stxn, txn })
+  if (cur(sender) < spend) throw new Error(`TransactionPool.Remember: transaction ${id}: overspend (account ${sender}, tried to spend ${spend})`)
+  deltas.set(sender, (deltas.get(sender) ?? 0n) - spend)
+  deltas.set(receiver, (deltas.get(receiver) ?? 0n) + amount)
+  for (const a of [sender, receiver]) {
+    const after = cur(a)
+    if (after > 0n && after < MIN_BALANCE) throw new Error(`TransactionPool.Remember: transaction ${id}: account ${a} balance ${after} below min ${MIN_BALANCE}`)
+  }
   return id
+}
+
+/** A POST body is one signed txn or a concatenation forming an atomic group. */
+function apply(rawBytes) {
+  const stxns = [...decodeMulti(rawBytes)].map((o) => algosdk.decodeSignedTransaction(algosdk.msgpackRawEncode(o)))
+  if (stxns.length > 16) throw new Error('TransactionPool.Remember: group size exceeds 16')
+  if (stxns.length > 1) {
+    // rawTxID covers the group field, so recompute over group-less copies.
+    const bare = stxns.map((s) => { const t = algosdk.decodeUnsignedTransaction(algosdk.encodeUnsignedTransaction(s.txn)); t.group = undefined; return t })
+    const gid = algosdk.computeGroupID(bare)
+    for (const s of stxns) {
+      if (!s.txn.group || Buffer.compare(Buffer.from(s.txn.group), Buffer.from(gid)) !== 0) throw new Error('TransactionPool.Remember: transactionGroup: incomplete group')
+    }
+  }
+  const deltas = new Map()
+  const ids = stxns.map((s) => check(s, deltas))
+  for (const [a, d] of deltas) balances.set(a, bal(a) + d)
+  round += 1n
+  const time = Math.floor(Date.now() / 1000)
+  stxns.forEach((stxn, i) => {
+    seen.add(ids[i])
+    txns.push({ id: ids[i], round, time, stxn, txn: stxn.txn })
+  })
+  return ids[0]
 }
 
 function indexerTxn(t) {
@@ -72,6 +96,7 @@ function indexerTxn(t) {
     lastValid: t.txn.lastValid,
     note: t.txn.note,
     txType: 'pay',
+    group: t.txn.group,
     confirmedRound: t.round,
     roundTime: t.time,
     genesisId: GENESIS_ID,

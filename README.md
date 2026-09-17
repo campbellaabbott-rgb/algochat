@@ -27,8 +27,17 @@ Then:
    already hold ≥ 0.1 ALGO — Algorand refuses payments that leave an account
    under the minimum balance.
 
-Each message costs the 0.001 ALGO network fee and fits ~680 encrypted
-characters (1024-byte note limit).
+Each transaction costs the 0.001 ALGO network fee and carries up to 1024
+note bytes (~680 encrypted characters). Longer messages ship as one atomic
+group of up to 16 transactions (~10k characters, all-or-nothing, one
+signature prompt), and the composer shows the transaction count and fee
+before you send.
+
+Recipients can be typed as an address or a `.algo` name (resolved through
+NFDomains on TestNet/MainNet). Click a name in the thread header to set a
+local nickname. Unread counts show per thread and in the tab title; the 🔔
+button turns on browser notifications for messages that arrive while you're
+elsewhere.
 
 ## How it works
 
@@ -37,17 +46,23 @@ characters (1024-byte note limit).
 | `amsg1:k:<b64 pub>` | Key announcement — a self-payment publishing your x25519 public key |
 | `amsg1:p:<text>` | Plaintext message |
 | `amsg1:e:<b64 senderPub>.<b64 nonce>.<b64 box>` | Encrypted message; both parties can open it |
+| `amsg1:x:<i>/<n>:<bytes>` | Piece *i* of *n* of a long message, sent as one atomic group; join by group id, then decode as above |
 
 - **Reads** go through the public AlgoNode indexer: one `note-prefix` +
-  `address` query returns your whole mailbox (sent and received), polled every
-  6 s.
+  `address` query returns your whole mailbox (sent and received) on connect,
+  then every 6 s from the last confirmed round.
 - **Writes** are signed by the connected wallet and submitted to AlgoNode
   algod; the UI waits for confirmation and shows the message as
   "indexing…" until the indexer catches up.
-- **Keys** — wallets don't expose private keys, so each (network, address)
-  gets a local x25519 keypair in `localStorage`. The 🔑 panel exports/imports
-  it so another device can read your history. Sent messages are also cached
-  locally by txid, so you can re-read them even if the peer rotates keys.
+- **Keys** — an x25519 pair per (network, address). Where the wallet can
+  help, it's *derived* so every device recomputes the same key: the Mnemonic
+  wallet derives from the account's private key automatically; Pera and Lute
+  can derive from an ARC-60 signature over a fixed message (🔑 → "Derive key
+  from wallet"; the message includes the site origin, so a different
+  deployment yields a different key). Otherwise a random key lives in
+  `localStorage` and the 🔑 panel exports/imports it. Sent messages are also
+  cached locally by txid, so you can re-read them even if the peer rotates
+  keys.
 
 Source map: [`src/lib/protocol.ts`](src/lib/protocol.ts) wire format ·
 [`src/lib/crypto.ts`](src/lib/crypto.ts) keys and boxes ·
@@ -86,5 +101,5 @@ recipient, forged signature, oversize note).
   on-chain even though the content is encrypted. Plaintext messages are
   public forever.
 - No forward secrecy — a leaked secret key opens the entire history.
-- The mailbox is refetched in full each poll; fine for hundreds of messages,
-  switch to `minRound` paging beyond that.
+- Wallet-derived keys via ARC-60 have not been exercised against a real Pera
+  or Lute here; the code falls back to a local key if signing fails.

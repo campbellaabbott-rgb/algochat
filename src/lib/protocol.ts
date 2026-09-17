@@ -54,3 +54,48 @@ export function decodeNote(note: Uint8Array | undefined): Payload | null {
   }
   return null
 }
+
+/**
+ * Long messages: the logical note is split into ≤16 pieces sent as one atomic
+ * group, each wrapped as `amsg1:x:<i>/<n>:<raw bytes>`. Readers reassemble by
+ * group id and then decode the joined bytes as a normal note.
+ */
+export const PREFIX_CHUNK = PREFIX + 'x:'
+export const MAX_CHUNKS = 16
+const CHUNK_HEADER_MAX = PREFIX_CHUNK.length + '15/16:'.length
+
+export function encodeChunks(note: Uint8Array, maxNote: number): Uint8Array[] {
+  if (note.length <= maxNote) return [note]
+  const cap = maxNote - CHUNK_HEADER_MAX
+  const n = Math.ceil(note.length / cap)
+  if (n > MAX_CHUNKS) throw new Error(`Message too long (${note.length} bytes; max ${cap * MAX_CHUNKS})`)
+  return Array.from({ length: n }, (_, i) => {
+    const head = utf8.enc(`${PREFIX_CHUNK}${i}/${n}:`)
+    const body = note.subarray(i * cap, (i + 1) * cap)
+    const out = new Uint8Array(head.length + body.length)
+    out.set(head)
+    out.set(body, head.length)
+    return out
+  })
+}
+
+export function decodeChunk(note: Uint8Array | undefined): { i: number; n: number; bytes: Uint8Array } | null {
+  if (!note || note.length < PREFIX_CHUNK.length + 4) return null
+  const head = utf8.dec(note.subarray(0, CHUNK_HEADER_MAX))
+  if (!head.startsWith(PREFIX_CHUNK)) return null
+  const m = /^(\d+)\/(\d+):/.exec(head.slice(PREFIX_CHUNK.length))
+  if (!m) return null
+  const i = Number(m[1]), n = Number(m[2])
+  if (!(n >= 2 && n <= MAX_CHUNKS && i >= 0 && i < n)) return null
+  return { i, n, bytes: note.subarray(PREFIX_CHUNK.length + m[0].length) }
+}
+
+export function joinChunks(parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0))
+  let o = 0
+  for (const p of parts) {
+    out.set(p, o)
+    o += p.length
+  }
+  return out
+}

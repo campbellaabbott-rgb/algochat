@@ -56,3 +56,42 @@ export function decrypt(box: Uint8Array, nonce: Uint8Array, theirPub: Uint8Array
 export const b64 = { enc: encodeBase64, dec: decodeBase64 }
 export const utf8 = { enc: decodeUTF8, dec: encodeUTF8 }
 export const samePub = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i])
+
+/**
+ * Deterministic keys: the same seed always yields the same x25519 pair, so a
+ * key derived from the wallet (its private key, or an ARC-60 signature over a
+ * fixed message) is identical on every device with no export step.
+ */
+export function deriveKeys(seed: Uint8Array): EncKeys {
+  const material = new Uint8Array(seed.length + 16)
+  material.set(seed)
+  material.set(decodeUTF8('algochat-enc-v1'), seed.length)
+  const secretKey = nacl.hash(material).slice(0, nacl.box.secretKeyLength)
+  return nacl.box.keyPair.fromSecretKey(secretKey)
+}
+
+export type KeySource = 'wallet' | 'local'
+const sourceKey = (net: string, addr: string) => `${storageKey(net, addr)}:src`
+
+export function keySource(net: string, addr: string): KeySource {
+  return localStorage.getItem(sourceKey(net, addr)) === 'wallet' ? 'wallet' : 'local'
+}
+
+export function storeKeys(net: string, addr: string, keys: EncKeys, source: KeySource) {
+  localStorage.setItem(storageKey(net, addr), encodeBase64(keys.secretKey))
+  localStorage.setItem(sourceKey(net, addr), source)
+}
+
+/** The fixed ARC-60 (SIWA) payload whose signature seeds a wallet-derived key. */
+export function keyDerivationMessage(address: string, chainId: string) {
+  return {
+    domain: location.host,
+    account_address: address,
+    uri: location.origin,
+    version: '1',
+    chain_id: chainId,
+    nonce: 'algochat-enc-v1',
+    statement: 'Derive your AlgoChat encryption key. Signing this does not send a transaction or spend anything.',
+    type: 'ed25519' as const,
+  }
+}
