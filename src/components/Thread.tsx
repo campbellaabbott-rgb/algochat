@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChainMessage } from '../lib/chain'
 import { shippingCost } from '../lib/chain'
 import { NETWORKS, type NetId } from '../lib/config'
+import { linkify } from '../lib/text'
 
 export type Rendered = { text: string; locked: boolean }
 
@@ -29,9 +30,13 @@ type Props = {
   onSend: (text: string) => Promise<void>
   onNickname: (name: string) => void
   onBack: () => void
+  relation: 'contact' | 'request' | 'blocked'
+  onAccept: () => void
+  onBlock: () => void
+  onUnblock: () => void
 }
 
-export function Thread({ net, me, peer, peerName, nickname, messages, peerKeyState, render, noteBytesFor, busy, onSend, onNickname, onBack }: Props) {
+export function Thread({ net, me, peer, peerName, nickname, messages, peerKeyState, render, noteBytesFor, busy, onSend, onNickname, onBack, relation, onAccept, onBlock, onUnblock }: Props) {
   const [draft, setDraft] = useState('')
   const [editing, setEditing] = useState(false)
   const [nickDraft, setNickDraft] = useState('')
@@ -44,7 +49,7 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
 
   const noteBytes = useMemo(() => (draft ? noteBytesFor(draft) : 0), [draft, noteBytesFor])
   const cost = useMemo(() => shippingCost(noteBytes), [noteBytes])
-  const canSend = !busy && draft.trim().length > 0 && cost !== null
+  const canSend = !busy && draft.trim().length > 0 && cost !== null && relation !== 'blocked'
 
   async function submit() {
     if (!canSend) return
@@ -100,6 +105,27 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
           {peerKeyState === 'loading' ? '…' : peerKeyState === 'ok' ? '🔒 end-to-end encrypted' : '🔓 plaintext — no key published'}
         </span>
       </div>
+      {relation === 'request' && (
+        <div className="banner warn inline">
+          <span>
+            <b>{peerName}</b> isn’t in your contacts. Anyone can pay the network fee to write to you.
+          </span>
+          <span>
+            <button onClick={onAccept}>Accept</button>{' '}
+            <button className="ghost" onClick={onBlock}>
+              Block
+            </button>
+          </span>
+        </div>
+      )}
+      {relation === 'blocked' && (
+        <div className="banner inline">
+          <span>You’ve blocked {peerName}. Their messages are hidden.</span>
+          <button className="ghost" onClick={onUnblock}>
+            Unblock
+          </button>
+        </div>
+      )}
       <div className="messages">
         {messages.map((m, i) => {
           const r = render(m)
@@ -110,11 +136,11 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
             <Fragment key={m.id}>
               {newDay && <div className="day">{day}</div>}
               <div className={`msg ${mine ? 'mine' : ''} ${r.locked ? 'locked' : ''}`}>
-              <div className="body">{r.text}</div>
+              <div className="body">{r.locked ? r.text : linkify(r.text)}</div>
               <div className="meta">
                 {m.txCount > 1 && <span title="Sent as one atomic group">{m.txCount} txns · </span>}
-                {m.round === 0n ? (
-                  'confirmed · indexing…'
+                {m.status ? (
+                  <span className="status">{{ signing: 'waiting for signature…', confirming: 'confirming on-chain…', indexing: 'confirmed · indexing…' }[m.status]}</span>
                 ) : (
                   <a href={`${explorer}/transaction/${m.id}`} target="_blank" rel="noreferrer">
                     {new Date(m.time * 1000).toLocaleString()}

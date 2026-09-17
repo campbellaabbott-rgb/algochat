@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import algosdk from 'algosdk'
-import { NetworkId, ScopeType } from '@txnlab/use-wallet'
+import { ScopeType } from '@txnlab/use-wallet'
 import { useNetwork, useWallet } from '@txnlab/use-wallet-react'
 import { NETWORKS, asNetId } from './lib/config'
 import { buildMessageNote, fetchPublishedKey, friendlyError, publishKey, sendMessage, type ChainMessage } from './lib/chain'
@@ -24,6 +24,9 @@ import { useBalance } from './hooks/useBalance'
 import { clearToLink, parseToLink } from './lib/links'
 import { SharePanel } from './components/SharePanel'
 import { MIN_BALANCE } from './lib/config'
+import { accept, block, loadAccepted, loadBlocked, unblock } from './lib/contacts'
+import { useConfirm } from './hooks/useConfirm'
+import { Landing } from './components/Landing'
 import { MnemonicModal } from './components/MnemonicModal'
 import { KeyPanel } from './components/KeyPanel'
 import { Thread, type Rendered } from './components/Thread'
@@ -32,7 +35,8 @@ const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`
 const sentCacheKey = (id: string) => `algochat:sent:${id}`
 const readKey = (net: string, me: string) => `algochat:read:${net}:${me}`
 
-type ThreadSummary = { peer: string; messages: ChainMessage[]; last: number; unread: number }
+type Relation = 'contact' | 'request' | 'blocked'
+type ThreadSummary = { peer: string; messages: ChainMessage[]; last: number; unread: number; relation: Relation }
 
 export default function App() {
   const { activeNetwork, activeNetworkConfig, setActiveNetwork } = useNetwork()
@@ -51,6 +55,11 @@ export default function App() {
   const [showKeys, setShowKeys] = useState(false)
   const [showShare, setShowShare] = useState(false)
   const [linkTarget, setLinkTarget] = useState<string | null>(() => parseToLink())
+  const [accepted, setAccepted] = useState<string[]>([])
+  const [blocked, setBlocked] = useState<string[]>([])
+  const [search, setSearch] = useState('')
+  const [showRequests, setShowRequests] = useState(true)
+  const { confirm, dialog: confirmDialog } = useConfirm()
   const [nicks, setNicks] = useState<Record<string, string>>({})
   const [nfd, setNfd] = useState<Record<string, string>>({})
   const [lastRead, setLastRead] = useState<Record<string, string>>({})
@@ -89,11 +98,12 @@ export default function App() {
     (incoming: ChainMessage[]) => {
       if (!notify || typeof Notification === 'undefined') return
       for (const m of incoming) {
+        if (blocked.includes(m.from)) continue
         if (visible && m.from === selected) continue
         new Notification(name(m.from), { body: render(m).text.slice(0, 120), tag: m.id })
       }
     },
-    [notify, visible, selected, name, render],
+    [notify, visible, selected, name, render, blocked],
   )
 
   const mailbox = useMailbox(net, me, onNew)
@@ -114,9 +124,14 @@ export default function App() {
       setKeys(null)
       setNicks({})
       setLastRead({})
+      setAccepted([])
+      setBlocked([])
       return
     }
     setNicks(loadNicknames(net, me))
+    setAccepted(loadAccepted(net, me))
+    setBlocked(loadBlocked(net, me))
+    setSearch('')
     try {
       setLastRead(JSON.parse(localStorage.getItem(readKey(net, me)) ?? '{}'))
     } catch {
@@ -162,12 +177,31 @@ export default function App() {
         ms.sort((a, b) => (a.round === b.round ? a.time - b.time : a.round < b.round ? -1 : 1))
         const readUpTo = BigInt(lastRead[peer] ?? '0')
         const unread = ms.filter((m) => m.from === peer && m.round > readUpTo).length
-        return { peer, messages: ms, last: ms[ms.length - 1]?.time ?? 0, unread }
+        // You've written to them, or explicitly accepted them → contact. Otherwise a request.
+        const relation: Relation = blocked.includes(peer)
+          ? 'blocked'
+          : accepted.includes(peer) || ms.some((m) => m.from === me)
+            ? 'contact'
+            : 'request'
+        return { peer, messages: ms, last: ms[ms.length - 1]?.time ?? 0, unread, relation }
       })
       .sort((a, b) => b.last - a.last)
-  }, [mailbox.messages, mailbox.pending, me, lastRead])
+  }, [mailbox.messages, mailbox.pending, me, lastRead, accepted, blocked])
 
-  const totalUnread = threads.reduce((s, t) => s + t.unread, 0)
+  const matches = useCallback(
+    (t: ThreadSummary) => {
+      const q = search.trim().toLowerCase()
+      if (!q) return true
+      if (t.peer.toLowerCase().includes(q) || name(t.peer).toLowerCase().includes(q)) return true
+      return t.messages.some((m) => render(m).text.toLowerCase().includes(q))
+    },
+    [search, name, render],
+  )
+  const contacts = threads.filter((t) => t.relation === 'contact' && matches(t))
+  const requests = threads.filter((t) => t.relation === 'request' && matches(t))
+  const blockedThreads = threads.filter((t) => t.relation === 'blocked' && matches(t))
+
+  const totalUnread = threads.filter((t) => t.relation === 'contact').reduce((s, t) => s + t.unread, 0)
   useEffect(() => {
     document.title = totalUnread ? `(${totalUnread}) AlgoChat` : 'AlgoChat'
   }, [totalUnread])
@@ -261,17 +295,39 @@ export default function App() {
     [keys, selected, peerKeys],
   )
 
-  const onSend = (text: string) =>
-    run('Waiting for signature…', async () => {
-      if (!me || !keys || !selected) return
-      const theirPub = await loadPeerKey(selected, true)
-      const note = buildMessageNote(text, keys, theirPub)
-      setBusy('Confirming on-chain…')
-      const id = await sendMessage(net, me, selected, note, transactionSigner)
-      localStorage.setItem(sentCacheKey(id), text)
-      void balance.refresh()
-      mailbox.addPending({ id, from: me, to: selected, round: 0n, time: Math.floor(Date.now() / 1000), payload: { kind: 'plain', text }, txCount: 1 })
+  const onSend = async (text: string) => {
+    if (!me || !keys || !selected) return
+    const peer = selected
+    const theirPub = await loadPeerKey(peer, true)
+    if (!theirPub) {
+      const ok = await confirm({
+        title: 'Send unencrypted?',
+        body: `${name(peer)} hasn’t published an encryption key, so this message would be written to the blockchain in plaintext — readable by anyone, forever.`,
+        confirmLabel: 'Send in plaintext',
+        danger: true,
+      })
+      if (!ok) throw new Error('cancelled') // Thread restores the draft; no banner
+    }
+    const localId = `local:${Date.now()}`
+    const base = { from: me, to: peer, round: 0n, time: Math.floor(Date.now() / 1000), payload: { kind: 'plain', text } as const, txCount: 1 }
+    mailbox.addPending({ ...base, id: localId, status: 'signing' })
+    await run('Waiting for signature…', async () => {
+      try {
+        const note = buildMessageNote(text, keys, theirPub)
+        const id = await sendMessage(net, me, peer, note, transactionSigner, () => {
+          setBusy('Confirming on-chain…')
+          mailbox.updatePending(localId, { status: 'confirming' })
+        })
+        localStorage.setItem(sentCacheKey(id), text)
+        mailbox.updatePending(localId, { id, status: 'indexing' })
+        if (!accepted.includes(peer)) setAccepted(accept(net, me, peer))
+        void balance.refresh()
+      } catch (e) {
+        mailbox.removePending(localId)
+        throw e
+      }
     })
+  }
 
   const openConversation = useCallback(
     async (target: string) => {
@@ -308,6 +364,15 @@ export default function App() {
   }
 
   const thread = threads.find((t) => t.peer === selected)
+  const row = (t: ThreadSummary) => (
+    <button key={t.peer} className={`thread ${t.peer === selected ? 'active' : ''}`} onClick={() => setSelected(t.peer)}>
+      <div className="row">
+        <span className={nicks[t.peer] || nfd[t.peer] ? 'peer' : 'peer mono'}>{name(t.peer)}</span>
+        {t.unread > 0 && <span className="badge">{t.unread}</span>}
+      </div>
+      <div className="preview">{render(t.messages[t.messages.length - 1]).text}</div>
+    </button>
+  )
   const peerKeyState = selected ? (selected in peerKeys ? (peerKeys[selected] ? 'ok' : 'none') : 'loading') : 'none'
   const canDerive = !!activeWallet?.canSignData
 
@@ -333,6 +398,15 @@ export default function App() {
               <button className="ghost" onClick={() => setShowKeys((s) => !s)} title="Encryption key">
                 🔑
               </button>
+              {activeWallet && activeWallet.accounts.length > 1 && (
+                <select value={me} onChange={(e) => activeWallet.setActiveAccount(e.target.value)} title="Switch account" className="acct">
+                  {activeWallet.accounts.map((a) => (
+                    <option key={a.address} value={a.address}>
+                      {a.name || short(a.address)}
+                    </option>
+                  ))}
+                </select>
+              )}
               <button className="ghost addr" title={me} onClick={() => setShowShare((s) => !s)}>
                 {name(me)}
                 {balance.micro !== null && <span className="bal"> · {(Number(balance.micro) / 1e6).toFixed(3)} ALGO</span>}
@@ -359,6 +433,19 @@ export default function App() {
         </div>
       )}
       {busy && <div className="banner">{busy}</div>}
+      {me && balance.micro !== null && balance.micro < BigInt(MIN_BALANCE) + 5000n && (
+        <div className="banner warn">
+          {balance.micro < 1000n ? 'Your balance can’t cover a network fee.' : `Low balance — about ${Number((balance.micro - BigInt(MIN_BALANCE)) / 1000n)} messages left before you hit the 0.1 ALGO minimum.`}
+          {NETWORKS[net].dispenser && (
+            <>
+              {' '}
+              <a href={NETWORKS[net].dispenser} target="_blank" rel="noreferrer">
+                Get TestNet ALGO
+              </a>
+            </>
+          )}
+        </div>
+      )}
       {me && needsPublish && !busy && (
         <div className="banner warn">
           Your encryption key isn’t on-chain yet, so people can only send you plaintext.{' '}
@@ -375,6 +462,7 @@ export default function App() {
       )}
 
       {mnemonicOpen && <MnemonicModal />}
+      {confirmDialog}
 
       {showShare && me && <SharePanel me={me} name={name(me)} onClose={() => setShowShare(false)} />}
 
@@ -396,22 +484,7 @@ export default function App() {
       )}
 
       {!me ? (
-        <main className="empty">
-          {linkTarget && <div className="banner warn">Connect a wallet to message {linkTarget}.</div>}
-          <h1>Messages that live on Algorand</h1>
-          <p>
-            Every message is a 0-ALGO payment with the text in the note field, encrypted end-to-end with NaCl. Nothing is
-            stored on a server — the chain is the mailbox.
-          </p>
-          <p>
-            Connect a wallet to start. On TestNet, the <b>Mnemonic</b> option lets you paste a throwaway 25-word phrase;
-            fund it at the{' '}
-            <a href={NETWORKS[NetworkId.TESTNET].dispenser} target="_blank" rel="noreferrer">
-              dispenser
-            </a>
-            .
-          </p>
-        </main>
+        <Landing linkTarget={linkTarget} />
       ) : (
         <main className={`layout ${selected ? 'thread-open' : ''}`}>
           <aside>
@@ -427,17 +500,23 @@ export default function App() {
                 New
               </button>
             </form>
+            {threads.length > 3 && <input className="search" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />}
             {mailbox.loading && threads.length === 0 && <div className="muted">Loading mailbox…</div>}
             {!mailbox.loading && threads.length === 0 && <div className="muted">No conversations yet.</div>}
-            {threads.map((t) => (
-              <button key={t.peer} className={`thread ${t.peer === selected ? 'active' : ''}`} onClick={() => setSelected(t.peer)}>
-                <div className="row">
-                  <span className={nicks[t.peer] || nfd[t.peer] ? 'peer' : 'peer mono'}>{name(t.peer)}</span>
-                  {t.unread > 0 && <span className="badge">{t.unread}</span>}
-                </div>
-                <div className="preview">{render(t.messages[t.messages.length - 1]).text}</div>
+            {requests.length > 0 && (
+              <button className="section" onClick={() => setShowRequests((v) => !v)}>
+                {showRequests ? '▾' : '▸'} Requests <span className="badge">{requests.length}</span>
               </button>
-            ))}
+            )}
+            {showRequests && requests.map(row)}
+            {requests.length > 0 && contacts.length > 0 && <div className="section muted">Conversations</div>}
+            {contacts.map(row)}
+            {blockedThreads.length > 0 && (
+              <details className="blocked">
+                <summary className="section muted">Blocked ({blockedThreads.length})</summary>
+                {blockedThreads.map(row)}
+              </details>
+            )}
           </aside>
 
           <section className="chat">
@@ -483,6 +562,14 @@ export default function App() {
                 onSend={onSend}
                 onNickname={(n) => setNicks(saveNickname(net, me, selected, n))}
                 onBack={() => setSelected(null)}
+                relation={thread?.relation ?? 'contact'}
+                onAccept={() => setAccepted(accept(net, me, selected))}
+                onBlock={() => {
+                  setBlocked(block(net, me, selected))
+                  setAccepted(loadAccepted(net, me))
+                  setSelected(null)
+                }}
+                onUnblock={() => setBlocked(unblock(net, me, selected))}
               />
             )}
           </section>

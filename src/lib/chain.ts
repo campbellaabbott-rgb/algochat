@@ -11,6 +11,7 @@ export type ChainMessage = {
   time: number // unix seconds
   payload: Payload
   txCount: number // >1 for a chunked long message
+  status?: 'signing' | 'confirming' | 'indexing' // only on optimistic local copies
 }
 
 type Signer = (txns: algosdk.Transaction[], indexes: number[]) => Promise<Uint8Array[]>
@@ -20,7 +21,9 @@ export async function fetchMessages(net: NetId, addr: string, minRound?: bigint)
   const indexer = indexerFor(net)
   const out: ChainMessage[] = []
   type Part = { i: number; bytes: Uint8Array }
-  const groups = new Map<string, { n: number; parts: Part[]; head: Omit<ChainMessage, 'payload' | 'txCount'> }>()
+  type Head = Pick<ChainMessage, 'id' | 'from' | 'to' | 'round' | 'time'>
+  type Group = { n: number; parts: Part[]; head: Head }
+  const groups = new Map<string, Group>()
   let next: string | undefined
   do {
     let q = indexer
@@ -35,11 +38,11 @@ export async function fetchMessages(net: NetId, addr: string, minRound?: bigint)
     for (const t of res.transactions) {
       const to = t.paymentTransaction?.receiver
       if (!to) continue
-      const head = { id: t.id ?? '', from: t.sender, to, round: t.confirmedRound ?? 0n, time: t.roundTime ?? 0 }
+      const head: Head = { id: t.id ?? '', from: t.sender, to, round: t.confirmedRound ?? 0n, time: t.roundTime ?? 0 }
       const chunk = decodeChunk(t.note)
       if (chunk && t.group) {
         const key = b64.enc(t.group)
-        const g = groups.get(key) ?? { n: chunk.n, parts: [], head }
+        const g: Group = groups.get(key) ?? { n: chunk.n, parts: [], head }
         g.parts.push({ i: chunk.i, bytes: chunk.bytes })
         if (chunk.i === 0) g.head = head
         groups.set(key, g)
@@ -90,13 +93,14 @@ export async function isFunded(net: NetId, addr: string): Promise<boolean> {
   }
 }
 
-async function sendNote(net: NetId, from: string, to: string, note: Uint8Array, signer: Signer): Promise<string> {
+async function sendNote(net: NetId, from: string, to: string, note: Uint8Array, signer: Signer, onSigned?: () => void): Promise<string> {
   const chunks = encodeChunks(note, MAX_NOTE_BYTES) // throws if over the group budget
   const algod = algodFor(net)
   const suggestedParams = await algod.getTransactionParams().do()
   const txns = chunks.map((n) => algosdk.makePaymentTxnWithSuggestedParamsFromObject({ sender: from, receiver: to, amount: 0, note: n, suggestedParams }))
   if (txns.length > 1) algosdk.assignGroupID(txns)
   const signed = await signer(txns, txns.map((_, i) => i))
+  onSigned?.()
   const { txid } = await algod.sendRawTransaction(signed).do()
   await algosdk.waitForConfirmation(algod, txid, 8)
   return txid
@@ -122,11 +126,11 @@ export function buildMessageNote(text: string, mine: EncKeys, theirPub: Uint8Arr
   return encodeEncrypted(mine.publicKey, nonce, box)
 }
 
-export async function sendMessage(net: NetId, from: string, to: string, note: Uint8Array, signer: Signer) {
+export async function sendMessage(net: NetId, from: string, to: string, note: Uint8Array, signer: Signer, onSigned?: () => void) {
   if (!(await isFunded(net, to))) {
     throw new Error('Recipient has never been funded; Algorand refuses payments that leave an account under 0.1 ALGO.')
   }
-  return sendNote(net, from, to, note, signer)
+  return sendNote(net, from, to, note, signer, onSigned)
 }
 
 /** algod errors embed the whole account record; keep the part a person can act on. */

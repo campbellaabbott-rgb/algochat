@@ -35,6 +35,13 @@ group of up to 16 transactions (~10k characters, all-or-nothing, one
 signature prompt), and the composer shows the transaction count and fee
 before you send.
 
+Anyone can pay the fee to write to you, so first-time senders land in a
+**Requests** section until you reply or accept them; **Block** hides a sender
+for good (locally — the chain doesn't know). The app warns before sending to
+someone with no published key, since that message would be public. Your
+mailbox is cached in the browser so reopening is instant and only new rounds
+are synced.
+
 Recipients can be typed as an address or a `.algo` name (resolved through
 NFDomains on TestNet/MainNet). Click a name in the thread header to set a
 local nickname. Unread counts show per thread and in the tab title; the 🔔

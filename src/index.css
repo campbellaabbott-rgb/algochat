@@ -151,3 +151,30 @@ header .bal { color: var(--muted); font-weight: 400; }
   .full { display: none; }
 }
 @media (min-width: 761px) { .compact { display: none; } }
+
+/* --- MVP round: landing, requests, search, statuses --- */
+.landing { max-width: 760px; margin: 0 auto; padding: 24px 16px 60px; line-height: 1.55; }
+.landing .hero h1 { font-size: 34px; margin: 16px 0 8px; letter-spacing: -0.01em; }
+.landing .lede { font-size: 17px; color: var(--muted); max-width: 620px; }
+.landing h2 { font-size: 20px; margin: 36px 0 12px; }
+.landing h3 { font-size: 15px; margin: 0 0 6px; color: var(--accent); }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 28px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.card p { margin: 0; color: var(--muted); font-size: 14px; }
+.landing table { border-collapse: collapse; width: 100%; }
+.landing td { padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 14px; }
+.landing td:last-child { text-align: right; color: var(--muted); white-space: nowrap; }
+.landing details { border-bottom: 1px solid var(--border); padding: 8px 0; }
+.landing summary { cursor: pointer; font-weight: 600; }
+.landing details p { color: var(--muted); margin: 8px 0 4px; }
+@media (max-width: 640px) { .grid3 { grid-template-columns: 1fr; } .landing .hero h1 { font-size: 26px; } }
+
+.search { width: 100%; margin-bottom: 8px; }
+.section { display: block; width: 100%; text-align: left; background: none; color: var(--text); padding: 8px 6px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.section .badge { margin-left: 6px; }
+details.blocked summary { list-style: none; cursor: pointer; }
+.banner.inline { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.status { font-style: italic; }
+button.danger { background: #ff5a6a; color: #2a0408; }
+header select.acct { max-width: 140px; }
+.msg .body a { color: inherit; text-decoration: underline; }
