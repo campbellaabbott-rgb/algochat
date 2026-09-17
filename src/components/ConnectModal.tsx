@@ -49,7 +49,7 @@ export function ConnectModal({ wallets, net, onNet, onConnected, onError, onClos
     void connect(mnemonicWallet, { newTestMnemonic: m })
   }
 
-  function useExistingPhrase() {
+  function connectWithPhrase() {
     if (!mnemonicWallet || words !== 25) return
     presetMnemonic(phrase.trim())
     void connect(mnemonicWallet)
@@ -109,7 +109,7 @@ export function ConnectModal({ wallets, net, onNet, onConnected, onError, onClos
                 className="row"
                 onSubmit={(e) => {
                   e.preventDefault()
-                  useExistingPhrase()
+                  connectWithPhrase()
                 }}
               >
                 <input value={phrase} onChange={(e) => setPhrase(e.target.value)} placeholder="word word word … (25 words, TestNet only)" autoFocus />
