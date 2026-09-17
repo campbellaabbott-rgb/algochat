@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "mockchain": "node scripts/mockchain.mjs"
   },
   "dependencies": {
     "@blockshake/defly-connect": "^1.2.1",

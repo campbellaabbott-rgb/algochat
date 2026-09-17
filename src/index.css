@@ -59,7 +59,7 @@ main.empty { max-width: 560px; margin: 60px auto; padding: 0 16px; line-height: 
 main.empty h1 { font-size: 28px; margin: 0 0 12px; }
 
 .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 300px 1fr; }
-aside { border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; padding: 10px; }
+aside { min-width: 0; border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; padding: 10px; }
 .newpeer { display: flex; gap: 6px; margin-bottom: 10px; }
 .newpeer input { flex: 1; min-width: 0; }
 .thread {
@@ -71,12 +71,12 @@ aside { border-right: 1px solid var(--border); background: var(--panel); overflo
 .thread .peer { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .thread .preview { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 
-.chat { display: flex; flex-direction: column; min-height: 0; }
+.chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .chathead {
   display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px;
   border-bottom: 1px solid var(--border); font-family: ui-monospace, Menlo, monospace; font-size: 12px;
 }
-.chathead a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chathead a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pill { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; color: var(--muted); white-space: nowrap; font-family: inherit; }
 .pill.ok { color: var(--accent); border-color: var(--accent); }
 

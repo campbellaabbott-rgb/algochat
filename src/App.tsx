@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import algosdk from 'algosdk'
 import { NetworkId } from '@txnlab/use-wallet'
 import { useNetwork, useWallet } from '@txnlab/use-wallet-react'
-import { NETWORKS, type NetId } from './lib/config'
+import { NETWORKS, asNetId } from './lib/config'
 import { buildMessageNote, fetchMessages, fetchPublishedKey, friendlyError, publishKey, sendMessage, type ChainMessage } from './lib/chain'
 import { decrypt, ensureKeys, exportSecret, importSecret, samePub, type EncKeys } from './lib/crypto'
 import { MAX_NOTE_BYTES } from './lib/config'
@@ -17,7 +17,7 @@ type Thread = { peer: string; messages: ChainMessage[]; last: number }
 export default function App() {
   const { activeNetwork, setActiveNetwork } = useNetwork()
   const { wallets, activeAddress, activeWallet, transactionSigner, isReady } = useWallet()
-  const net = (activeNetwork === NetworkId.MAINNET ? NetworkId.MAINNET : NetworkId.TESTNET) as NetId
+  const net = asNetId(activeNetwork)
   const me = activeAddress
 
   const [keys, setKeys] = useState<EncKeys | null>(null)
@@ -43,6 +43,7 @@ export default function App() {
     }
     setKeys(ensureKeys(net, me))
     setPublishedKey(undefined)
+    setPeerKeys({})
     fetchPublishedKey(net, me).then(setPublishedKey).catch(() => setPublishedKey(null))
   }, [net, me])
 
@@ -53,12 +54,17 @@ export default function App() {
     try {
       const msgs = await fetchMessages(net, me)
       setMessages(msgs)
+      // A peer can publish a key at any time; keep the open thread's current.
+      if (selected) {
+        const k = await fetchPublishedKey(net, selected).catch(() => undefined)
+        if (k !== undefined) setPeerKeys((p) => ({ ...p, [selected]: k }))
+      }
       setPending((p) => p.filter((x) => !msgs.some((m) => m.id === x.id)))
       setError((e) => (e?.startsWith('Indexer') ? null : e))
     } catch (e) {
       setError(`Indexer unreachable: ${(e as Error).message}`)
     }
-  }, [net, me])
+  }, [net, me, selected])
 
   useEffect(() => {
     if (!me) {

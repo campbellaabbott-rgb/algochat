@@ -54,14 +54,31 @@ Source map: [`src/lib/protocol.ts`](src/lib/protocol.ts) wire format ·
 [`src/lib/chain.ts`](src/lib/chain.ts) indexer reads and transaction sends ·
 [`src/App.tsx`](src/App.tsx) UI.
 
+## Local chain without Docker
+
+```bash
+npm run mockchain -- --fund ADDR1,ADDR2
+```
+
+`scripts/mockchain.mjs` is an in-memory stand-in that speaks the algod +
+indexer REST subset this app uses, on the AlgoKit LocalNet ports. It decodes
+submitted transactions with algosdk, verifies the ed25519 signature, and
+applies fee and minimum-balance rules — so the whole signing/encoding/reading
+path runs for real without a dispenser. Pick **LocalNet** in the app's network
+selector. It is not a consensus node (payments only; no TEAL, assets or
+groups); a real AlgoKit LocalNet works on the same ports.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Covers the note codec, encrypt/decrypt for sender, recipient and a third
-party, the size budget, and key persistence.
+Unit tests cover the note codec, encrypt/decrypt for sender, recipient and a
+third party, the size budget, and key persistence. The integration test
+spawns the mock chain and runs two accounts through key publish, encrypted
+send and reply, plaintext fallback, and the rejection paths (unfunded
+recipient, forged signature, oversize note).
 
 ## Caveats
 

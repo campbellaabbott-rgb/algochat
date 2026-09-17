@@ -1,30 +1,44 @@
 import algosdk from 'algosdk'
 import { NetworkId } from '@txnlab/use-wallet'
 
-export type NetId = typeof NetworkId.TESTNET | typeof NetworkId.MAINNET
+export type NetId = typeof NetworkId.TESTNET | typeof NetworkId.MAINNET | typeof NetworkId.LOCALNET
 
-export const NETWORKS: Record<NetId, { label: string; algod: string; indexer: string; explorer: string; dispenser?: string }> = {
+type Endpoint = { url: string; port: number; token?: string }
+export const NETWORKS: Record<NetId, { label: string; algod: Endpoint; indexer: Endpoint; explorer: string; dispenser?: string }> = {
   [NetworkId.TESTNET]: {
     label: 'TestNet',
-    algod: 'https://testnet-api.algonode.cloud',
-    indexer: 'https://testnet-idx.algonode.cloud',
+    algod: { url: 'https://testnet-api.algonode.cloud', port: 443 },
+    indexer: { url: 'https://testnet-idx.algonode.cloud', port: 443 },
     explorer: 'https://lora.algokit.io/testnet',
     dispenser: 'https://bank.testnet.algorand.network/',
   },
   [NetworkId.MAINNET]: {
     label: 'MainNet',
-    algod: 'https://mainnet-api.algonode.cloud',
-    indexer: 'https://mainnet-idx.algonode.cloud',
+    algod: { url: 'https://mainnet-api.algonode.cloud', port: 443 },
+    indexer: { url: 'https://mainnet-idx.algonode.cloud', port: 443 },
     explorer: 'https://lora.algokit.io/mainnet',
+  },
+  // AlgoKit LocalNet ports; `node scripts/mockchain.mjs` serves the same ones.
+  [NetworkId.LOCALNET]: {
+    label: 'LocalNet',
+    algod: { url: 'http://localhost', port: 4001, token: 'a'.repeat(64) },
+    indexer: { url: 'http://localhost', port: 8980 },
+    explorer: 'https://lora.algokit.io/localnet',
   },
 }
 
 export function indexerFor(net: NetId) {
-  return new algosdk.Indexer('', NETWORKS[net].indexer, 443)
+  const e = NETWORKS[net].indexer
+  return new algosdk.Indexer(e.token ?? '', e.url, e.port)
 }
 
 export function algodFor(net: NetId) {
-  return new algosdk.Algodv2('', NETWORKS[net].algod, 443)
+  const e = NETWORKS[net].algod
+  return new algosdk.Algodv2(e.token ?? '', e.url, e.port)
+}
+
+export function asNetId(id: string): NetId {
+  return id === NetworkId.MAINNET || id === NetworkId.LOCALNET ? id : NetworkId.TESTNET
 }
 
 /** Algorand rejects a receiver that would end below the 0.1 ALGO minimum balance. */
