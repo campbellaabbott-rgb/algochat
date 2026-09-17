@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import algosdk from 'algosdk'
 import { NetworkId, ScopeType } from '@txnlab/use-wallet'
 import { useNetwork, useWallet } from '@txnlab/use-wallet-react'
@@ -20,6 +20,10 @@ import {
 import { isNfdName, loadNicknames, resolveNfd, reverseNfd, saveNickname } from './lib/names'
 import { useMnemonicPromptOpen } from './lib/mnemonicPrompt'
 import { useMailbox } from './hooks/useMailbox'
+import { useBalance } from './hooks/useBalance'
+import { clearToLink, parseToLink } from './lib/links'
+import { SharePanel } from './components/SharePanel'
+import { MIN_BALANCE } from './lib/config'
 import { MnemonicModal } from './components/MnemonicModal'
 import { KeyPanel } from './components/KeyPanel'
 import { Thread, type Rendered } from './components/Thread'
@@ -45,6 +49,8 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showKeys, setShowKeys] = useState(false)
+  const [showShare, setShowShare] = useState(false)
+  const [linkTarget, setLinkTarget] = useState<string | null>(() => parseToLink())
   const [nicks, setNicks] = useState<Record<string, string>>({})
   const [nfd, setNfd] = useState<Record<string, string>>({})
   const [lastRead, setLastRead] = useState<Record<string, string>>({})
@@ -91,6 +97,13 @@ export default function App() {
   )
 
   const mailbox = useMailbox(net, me, onNew)
+  const balance = useBalance(net, me)
+
+  useEffect(() => {
+    const f = () => setLinkTarget(parseToLink())
+    window.addEventListener('hashchange', f)
+    return () => window.removeEventListener('hashchange', f)
+  }, [])
 
   // Per-account local state: encryption key, nicknames, read markers.
   useEffect(() => {
@@ -227,6 +240,7 @@ export default function App() {
       if (!me || !keys) return
       await publishKey(net, me, keys, transactionSigner)
       setPublishedKey(keys.publicKey)
+      void balance.refresh()
     }).catch(() => {})
 
   const onDeriveFromWallet = () =>
@@ -255,22 +269,35 @@ export default function App() {
       setBusy('Confirming on-chain…')
       const id = await sendMessage(net, me, selected, note, transactionSigner)
       localStorage.setItem(sentCacheKey(id), text)
+      void balance.refresh()
       mailbox.addPending({ id, from: me, to: selected, round: 0n, time: Math.floor(Date.now() / 1000), payload: { kind: 'plain', text }, txCount: 1 })
     })
 
-  async function startConversation() {
-    let a = newPeer.trim()
-    if (isNfdName(a)) {
-      const resolved = await run(`Resolving ${a}…`, () => resolveNfd(net, a)).catch(() => null)
-      if (!resolved) return setError(`${a} did not resolve on ${NETWORKS[net].label}`)
-      a = resolved
-    }
-    if (!algosdk.isValidAddress(a)) return setError('Enter an Algorand address or a .algo name')
-    if (a === me) return setError('That is your own address')
-    setError(null)
-    setSelected(a)
-    setNewPeer('')
-  }
+  const openConversation = useCallback(
+    async (target: string) => {
+      let a = target.trim()
+      if (isNfdName(a)) {
+        const resolved = await run(`Resolving ${a}…`, () => resolveNfd(net, a)).catch(() => null)
+        if (!resolved) return setError(`${a} did not resolve on ${NETWORKS[net].label}`)
+        a = resolved
+      }
+      if (!algosdk.isValidAddress(a)) return setError('Enter an Algorand address or a .algo name')
+      if (a === me) return setError('That is your own address')
+      setError(null)
+      setSelected(a)
+      setNewPeer('')
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [net, me],
+  )
+
+  // A `#/to/…` link opens that conversation as soon as a wallet is connected.
+  useEffect(() => {
+    if (!me || !linkTarget) return
+    setLinkTarget(null)
+    clearToLink()
+    void openConversation(linkTarget)
+  }, [me, linkTarget, openConversation])
 
   async function toggleNotify() {
     if (typeof Notification === 'undefined') return setError('This browser has no notification support')
@@ -306,10 +333,14 @@ export default function App() {
               <button className="ghost" onClick={() => setShowKeys((s) => !s)} title="Encryption key">
                 🔑
               </button>
-              <button className="ghost addr" title={`${me}\nClick to copy`} onClick={() => navigator.clipboard?.writeText(me)}>
-                {activeWallet?.metadata.name} · {name(me)} ⧉
+              <button className="ghost addr" title={me} onClick={() => setShowShare((s) => !s)}>
+                {name(me)}
+                {balance.micro !== null && <span className="bal"> · {(Number(balance.micro) / 1e6).toFixed(3)} ALGO</span>}
               </button>
-              <button onClick={() => activeWallet?.disconnect()}>Disconnect</button>
+              <button onClick={() => activeWallet?.disconnect()} title="Disconnect">
+                <span className="full">Disconnect</span>
+                <span className="compact">⏻</span>
+              </button>
             </>
           ) : (
             wallets.map((w) => (
@@ -345,6 +376,8 @@ export default function App() {
 
       {mnemonicOpen && <MnemonicModal />}
 
+      {showShare && me && <SharePanel me={me} name={name(me)} onClose={() => setShowShare(false)} />}
+
       {showKeys && me && keys && (
         <KeyPanel
           keys={keys}
@@ -364,6 +397,7 @@ export default function App() {
 
       {!me ? (
         <main className="empty">
+          {linkTarget && <div className="banner warn">Connect a wallet to message {linkTarget}.</div>}
           <h1>Messages that live on Algorand</h1>
           <p>
             Every message is a 0-ALGO payment with the text in the note field, encrypted end-to-end with NaCl. Nothing is
@@ -379,13 +413,13 @@ export default function App() {
           </p>
         </main>
       ) : (
-        <main className="layout">
+        <main className={`layout ${selected ? 'thread-open' : ''}`}>
           <aside>
             <form
               className="newpeer"
               onSubmit={(e) => {
                 e.preventDefault()
-                void startConversation()
+                void openConversation(newPeer)
               }}
             >
               <input placeholder="Address or name.algo…" value={newPeer} onChange={(e) => setNewPeer(e.target.value)} />
@@ -408,9 +442,34 @@ export default function App() {
 
           <section className="chat">
             {!selected ? (
-              <div className="muted center">Pick a conversation, or paste an address or .algo name.</div>
+              <div className="center">
+                <div className="checklist">
+                  <h2>Getting set up</h2>
+                  <Step done>Wallet connected as {name(me)}</Step>
+                  <Step done={balance.micro !== null && balance.micro >= BigInt(MIN_BALANCE)}>
+                    Funded — every message costs the 0.001 ALGO network fee
+                    {balance.micro !== null && balance.micro < BigInt(MIN_BALANCE) && NETWORKS[net].dispenser && (
+                      <>
+                        {' '}
+                        <a href={NETWORKS[net].dispenser} target="_blank" rel="noreferrer">
+                          Get TestNet ALGO
+                        </a>
+                      </>
+                    )}
+                  </Step>
+                  <Step done={!!publishedKey && !!keys && samePub(publishedKey, keys.publicKey)}>Encryption key published, so people can write to you privately</Step>
+                  <Step done={threads.length > 0}>
+                    First conversation — paste an address or <code>name.algo</code>, or{' '}
+                    <button className="link" onClick={() => setShowShare(true)}>
+                      share your link
+                    </button>{' '}
+                    so someone can message you
+                  </Step>
+                </div>
+              </div>
             ) : (
               <Thread
+                key={selected}
                 net={net}
                 me={me}
                 peer={selected}
@@ -423,11 +482,21 @@ export default function App() {
                 busy={!!busy}
                 onSend={onSend}
                 onNickname={(n) => setNicks(saveNickname(net, me, selected, n))}
+                onBack={() => setSelected(null)}
               />
             )}
           </section>
         </main>
       )}
+    </div>
+  )
+}
+
+function Step({ done, children }: { done: boolean; children: ReactNode }) {
+  return (
+    <div className={`step ${done ? 'done' : ''}`}>
+      <span className="tick">{done ? '✓' : '○'}</span>
+      <span>{children}</span>
     </div>
   )
 }

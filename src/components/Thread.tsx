@@ -1,9 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChainMessage } from '../lib/chain'
 import { shippingCost } from '../lib/chain'
 import { NETWORKS, type NetId } from '../lib/config'
 
 export type Rendered = { text: string; locked: boolean }
+
+function dayLabel(unix: number) {
+  const d = new Date(unix * 1000)
+  const today = new Date()
+  const y = new Date(today)
+  y.setDate(today.getDate() - 1)
+  if (d.toDateString() === today.toDateString()) return 'Today'
+  if (d.toDateString() === y.toDateString()) return 'Yesterday'
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' })
+}
 
 type Props = {
   net: NetId
@@ -18,9 +28,10 @@ type Props = {
   busy: boolean
   onSend: (text: string) => Promise<void>
   onNickname: (name: string) => void
+  onBack: () => void
 }
 
-export function Thread({ net, me, peer, peerName, nickname, messages, peerKeyState, render, noteBytesFor, busy, onSend, onNickname }: Props) {
+export function Thread({ net, me, peer, peerName, nickname, messages, peerKeyState, render, noteBytesFor, busy, onSend, onNickname, onBack }: Props) {
   const [draft, setDraft] = useState('')
   const [editing, setEditing] = useState(false)
   const [nickDraft, setNickDraft] = useState('')
@@ -30,8 +41,6 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' })
   }, [peer, messages.length])
-
-  useEffect(() => setDraft(''), [peer])
 
   const noteBytes = useMemo(() => (draft ? noteBytesFor(draft) : 0), [draft, noteBytesFor])
   const cost = useMemo(() => shippingCost(noteBytes), [noteBytes])
@@ -51,6 +60,9 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
   return (
     <>
       <div className="chathead">
+        <button className="ghost back" onClick={onBack} aria-label="Back to conversations">
+          ‹
+        </button>
         <div className="who">
           {editing ? (
             <form
@@ -89,11 +101,15 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
         </span>
       </div>
       <div className="messages">
-        {messages.map((m) => {
+        {messages.map((m, i) => {
           const r = render(m)
           const mine = m.from === me
+          const day = dayLabel(m.time)
+          const newDay = i === 0 || dayLabel(messages[i - 1].time) !== day
           return (
-            <div key={m.id} className={`msg ${mine ? 'mine' : ''} ${r.locked ? 'locked' : ''}`}>
+            <Fragment key={m.id}>
+              {newDay && <div className="day">{day}</div>}
+              <div className={`msg ${mine ? 'mine' : ''} ${r.locked ? 'locked' : ''}`}>
               <div className="body">{r.text}</div>
               <div className="meta">
                 {m.txCount > 1 && <span title="Sent as one atomic group">{m.txCount} txns · </span>}
@@ -105,7 +121,8 @@ export function Thread({ net, me, peer, peerName, nickname, messages, peerKeySta
                   </a>
                 )}
               </div>
-            </div>
+              </div>
+            </Fragment>
           )
         })}
         <div ref={bottomRef} />

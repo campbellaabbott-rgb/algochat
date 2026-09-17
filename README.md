@@ -1,5 +1,7 @@
 # AlgoChat
 
+**Live:** https://campbellaabbott-rgb.github.io/algochat/ — installable as a PWA on iOS/Android.
+
 Serverless messaging on Algorand. Every message is a 0-ALGO payment whose
 note field carries the text, so the chain is the mailbox: no backend, no
 accounts, nothing to take down. Messages are end-to-end encrypted with NaCl
@@ -68,6 +70,17 @@ Source map: [`src/lib/protocol.ts`](src/lib/protocol.ts) wire format ·
 [`src/lib/crypto.ts`](src/lib/crypto.ts) keys and boxes ·
 [`src/lib/chain.ts`](src/lib/chain.ts) indexer reads and transaction sends ·
 [`src/App.tsx`](src/App.tsx) UI.
+
+## Deploying
+
+Pushes to `main` run [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml):
+tests, a production build with `VITE_BASE=/algochat/`, and a GitHub Pages
+deploy. To host elsewhere, `npm run build` (set `VITE_BASE` to the subpath
+if any) and serve `dist/` as static files — there is no server component.
+
+Share `https://…/algochat/#/to/<address-or-name.algo>` to drop someone
+straight into a conversation with you; the 👤 header button shows your link
+and a QR code.
 
 ## Local chain without Docker
 

@@ -15,8 +15,11 @@ export function useMailbox(net: NetId, me: string | null, onNew?: (incoming: Cha
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const maxRound = useRef<bigint | null>(null)
+  const failures = useRef(0)
   const onNewRef = useRef(onNew)
-  onNewRef.current = onNew
+  useEffect(() => {
+    onNewRef.current = onNew
+  }, [onNew])
 
   const refresh = useCallback(async () => {
     if (!me) return
@@ -35,8 +38,10 @@ export function useMailbox(net: NetId, me: string | null, onNew?: (incoming: Cha
       } else if (maxRound.current === null) {
         maxRound.current = 0n
       }
+      failures.current = 0
       setError(null)
     } catch (e) {
+      failures.current += 1
       setError(`Indexer unreachable: ${(e as Error).message}`)
     }
   }, [net, me])
@@ -45,11 +50,24 @@ export function useMailbox(net: NetId, me: string | null, onNew?: (incoming: Cha
     setMessages([])
     setPending([])
     maxRound.current = null
+    failures.current = 0
     if (!me) return
-    setLoading(true)
-    refresh().finally(() => setLoading(false))
-    const t = setInterval(refresh, POLL_MS)
-    return () => clearInterval(t)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let stopped = false
+    // Poll on a fixed cadence while healthy; back off (to 60 s) while the indexer is failing.
+    const tick = async () => {
+      setLoading(maxRound.current === null)
+      await refresh()
+      setLoading(false)
+      if (stopped) return
+      const delay = Math.min(POLL_MS * 2 ** failures.current, 60_000)
+      timer = setTimeout(tick, delay)
+    }
+    void tick()
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+    }
   }, [me, refresh])
 
   const addPending = useCallback((m: ChainMessage) => setPending((p) => [...p, m]), [])
