@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import algosdk from 'algosdk'
 import { ScopeType } from '@txnlab/use-wallet'
 import { useNetwork, useWallet } from '@txnlab/use-wallet-react'
-import { NETWORKS, asNetId } from './lib/config'
+import { NETWORKS, asNetId, type NetId } from './lib/config'
 import { buildMessageNote, fetchPublishedKey, friendlyError, publishKey, sendMessage, type ChainMessage } from './lib/chain'
 import {
   decrypt,
@@ -23,10 +23,14 @@ import { useMailbox } from './hooks/useMailbox'
 import { useBalance } from './hooks/useBalance'
 import { clearToLink, parseToLink } from './lib/links'
 import { SharePanel } from './components/SharePanel'
-import { MIN_BALANCE } from './lib/config'
 import { accept, block, loadAccepted, loadBlocked, unblock } from './lib/contacts'
 import { useConfirm } from './hooks/useConfirm'
 import { Landing } from './components/Landing'
+import { ConnectModal } from './components/ConnectModal'
+import { NewChatModal } from './components/NewChatModal'
+import { SetupGuide } from './components/SetupGuide'
+import { AccountMenu } from './components/AccountMenu'
+import { Avatar } from './components/Avatar'
 import { MnemonicModal } from './components/MnemonicModal'
 import { KeyPanel } from './components/KeyPanel'
 import { Thread, type Rendered } from './components/Thread'
@@ -49,11 +53,15 @@ export default function App() {
   const [publishedKey, setPublishedKey] = useState<Uint8Array | null | undefined>(undefined)
   const [peerKeys, setPeerKeys] = useState<Record<string, Uint8Array | null>>({})
   const [selected, setSelected] = useState<string | null>(null)
-  const [newPeer, setNewPeer] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showKeys, setShowKeys] = useState(false)
   const [showShare, setShowShare] = useState(false)
+  const [showConnect, setShowConnect] = useState(false)
+  const [showNew, setShowNew] = useState(false)
+  const [showMenu, setShowMenu] = useState(false)
+  const [testMnemonic, setTestMnemonic] = useState<string | null>(null)
+  const testKey = (a: string) => `algochat:testacct:${a}`
   const [linkTarget, setLinkTarget] = useState<string | null>(() => parseToLink())
   const [accepted, setAccepted] = useState<string[]>([])
   const [blocked, setBlocked] = useState<string[]>([])
@@ -128,6 +136,7 @@ export default function App() {
       setBlocked([])
       return
     }
+    setTestMnemonic(localStorage.getItem(testKey(me)))
     setNicks(loadNicknames(net, me))
     setAccepted(loadAccepted(net, me))
     setBlocked(loadBlocked(net, me))
@@ -341,7 +350,6 @@ export default function App() {
       if (a === me) return setError('That is your own address')
       setError(null)
       setSelected(a)
-      setNewPeer('')
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [net, me],
@@ -364,64 +372,74 @@ export default function App() {
   }
 
   const thread = threads.find((t) => t.peer === selected)
-  const row = (t: ThreadSummary) => (
-    <button key={t.peer} className={`thread ${t.peer === selected ? 'active' : ''}`} onClick={() => setSelected(t.peer)}>
-      <div className="row">
-        <span className={nicks[t.peer] || nfd[t.peer] ? 'peer' : 'peer mono'}>{name(t.peer)}</span>
-        {t.unread > 0 && <span className="badge">{t.unread}</span>}
-      </div>
-      <div className="preview">{render(t.messages[t.messages.length - 1]).text}</div>
-    </button>
-  )
+  const row = (t: ThreadSummary) => {
+    const last = t.messages[t.messages.length - 1]
+    return (
+      <button key={t.peer} className={`thread ${t.peer === selected ? 'active' : ''}`} onClick={() => setSelected(t.peer)}>
+        <Avatar addr={t.peer} label={nicks[t.peer] || nfd[t.peer]} />
+        <div className="min0">
+          <div className="row">
+            <span className={nicks[t.peer] || nfd[t.peer] ? 'peer' : 'peer mono'}>{name(t.peer)}</span>
+            {t.unread > 0 ? <span className="badge">{t.unread}</span> : <span className="muted small">{ago(last.time)}</span>}
+          </div>
+          <div className="preview">{last.from === me ? 'You: ' : ''}{render(last).text}</div>
+        </div>
+      </button>
+    )
+  }
   const peerKeyState = selected ? (selected in peerKeys ? (peerKeys[selected] ? 'ok' : 'none') : 'loading') : 'none'
   const canDerive = !!activeWallet?.canSignData
+
+  const onNet = (id: NetId) => void setActiveNetwork(id)
+  const recent = contacts.map((t) => ({ peer: t.peer, name: name(t.peer) }))
 
   return (
     <div className="app">
       <header>
         <div className="brand">
           <span className="logo">◈</span> AlgoChat
+          {me && <span className="netpill">{NETWORKS[net].label}</span>}
         </div>
         <div className="controls">
-          <select value={net} onChange={(e) => void setActiveNetwork(e.target.value)} disabled={!!busy}>
-            {Object.entries(NETWORKS).map(([id, n]) => (
-              <option key={id} value={id}>
-                {n.label}
-              </option>
-            ))}
-          </select>
           {me ? (
-            <>
-              <button className="ghost" onClick={toggleNotify} title={notify ? 'Notifications on' : 'Enable notifications'}>
-                {notify ? '🔔' : '🔕'}
+            <div className="acct-wrap">
+              <button className="acct-btn" onClick={() => setShowMenu((m) => !m)} aria-haspopup="menu" aria-expanded={showMenu}>
+                <Avatar addr={me} label={name(me)} size={30} />
+                <span className="acct-name ell">{name(me)}</span>
+                <span className="chev">▾</span>
               </button>
-              <button className="ghost" onClick={() => setShowKeys((s) => !s)} title="Encryption key">
-                🔑
-              </button>
-              {activeWallet && activeWallet.accounts.length > 1 && (
-                <select value={me} onChange={(e) => activeWallet.setActiveAccount(e.target.value)} title="Switch account" className="acct">
-                  {activeWallet.accounts.map((a) => (
-                    <option key={a.address} value={a.address}>
-                      {a.name || short(a.address)}
-                    </option>
-                  ))}
-                </select>
+              {showMenu && (
+                <AccountMenu
+                  me={me}
+                  name={name(me)}
+                  wallet={activeWallet}
+                  net={net}
+                  balance={balance.micro}
+                  notify={notify}
+                  keySource={source}
+                  onNet={onNet}
+                  onToggleNotify={() => void toggleNotify()}
+                  onShare={() => {
+                    setShowMenu(false)
+                    setShowShare(true)
+                  }}
+                  onKeys={() => {
+                    setShowMenu(false)
+                    setShowKeys(true)
+                  }}
+                  onDisconnect={() => {
+                    setShowMenu(false)
+                    setTestMnemonic(null)
+                    void activeWallet?.disconnect()
+                  }}
+                  onClose={() => setShowMenu(false)}
+                />
               )}
-              <button className="ghost addr" title={me} onClick={() => setShowShare((s) => !s)}>
-                {name(me)}
-                {balance.micro !== null && <span className="bal"> · {(Number(balance.micro) / 1e6).toFixed(3)} ALGO</span>}
-              </button>
-              <button onClick={() => activeWallet?.disconnect()} title="Disconnect">
-                <span className="full">Disconnect</span>
-                <span className="compact">⏻</span>
-              </button>
-            </>
+            </div>
           ) : (
-            wallets.map((w) => (
-              <button key={w.id} onClick={() => w.connect().catch((e) => setError(friendlyError(e)))} disabled={!isReady}>
-                {w.metadata.name}
-              </button>
-            ))
+            <button className="primary" onClick={() => setShowConnect(true)} disabled={!isReady}>
+              Connect wallet
+            </button>
           )}
         </div>
       </header>
@@ -433,76 +451,89 @@ export default function App() {
         </div>
       )}
       {busy && <div className="banner">{busy}</div>}
-      {me && balance.micro !== null && balance.micro < BigInt(MIN_BALANCE) + 5000n && (
+      {me && selected && needsPublish && !busy && (
         <div className="banner warn">
-          {balance.micro < 1000n ? 'Your balance can’t cover a network fee.' : `Low balance — about ${Number((balance.micro - BigInt(MIN_BALANCE)) / 1000n)} messages left before you hit the 0.1 ALGO minimum.`}
-          {NETWORKS[net].dispenser && (
-            <>
-              {' '}
-              <a href={NETWORKS[net].dispenser} target="_blank" rel="noreferrer">
-                Get TestNet ALGO
-              </a>
-            </>
-          )}
-        </div>
-      )}
-      {me && needsPublish && !busy && (
-        <div className="banner warn">
-          Your encryption key isn’t on-chain yet, so people can only send you plaintext.{' '}
+          People can only send you plaintext until your encryption key is on-chain.{' '}
           <button onClick={onPublishKey}>Publish key (0.001 ALGO)</button>
-          {canDerive && source !== 'wallet' && (
-            <>
-              {' '}
-              <button className="ghost" onClick={onDeriveFromWallet}>
-                Derive from wallet first
-              </button>
-            </>
-          )}
         </div>
       )}
 
+      {showConnect && !me && (
+        <ConnectModal
+          wallets={wallets}
+          net={net}
+          onNet={onNet}
+          onConnected={(opts) => {
+            setShowConnect(false)
+            if (opts?.newTestMnemonic) {
+              // The adapter already persists the phrase; this flag just keeps the "throwaway account" reminder visible.
+              const addr = algosdk.mnemonicToSecretKey(opts.newTestMnemonic).addr.toString()
+              localStorage.setItem(testKey(addr), opts.newTestMnemonic)
+              setTestMnemonic(opts.newTestMnemonic)
+            }
+          }}
+          onError={setError}
+          onClose={() => setShowConnect(false)}
+        />
+      )}
+      {showNew && me && (
+        <NewChatModal
+          net={net}
+          me={me}
+          recent={recent}
+          onStart={(addr) => {
+            setShowNew(false)
+            void openConversation(addr)
+          }}
+          onClose={() => setShowNew(false)}
+        />
+      )}
       {mnemonicOpen && <MnemonicModal />}
       {confirmDialog}
 
-      {showShare && me && <SharePanel me={me} name={name(me)} onClose={() => setShowShare(false)} />}
-
+      {showShare && me && (
+        <div className="modal-backdrop" onClick={() => setShowShare(false)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <SharePanel me={me} name={name(me)} onClose={() => setShowShare(false)} />
+          </div>
+        </div>
+      )}
       {showKeys && me && keys && (
-        <KeyPanel
-          keys={keys}
-          source={source}
-          canDerive={canDerive}
-          onDerive={onDeriveFromWallet}
-          onImport={(b64) => {
-            const k = importSecret(net, me, b64)
-            storeKeys(net, me, k, 'local')
-            setKeys(k)
-            setSource('local')
-            setPublishedKey((p) => (p && samePub(p, k.publicKey) ? p : null))
-          }}
-          onClose={() => setShowKeys(false)}
-        />
+        <div className="modal-backdrop" onClick={() => setShowKeys(false)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <KeyPanel
+              keys={keys}
+              source={source}
+              canDerive={canDerive}
+              onDerive={onDeriveFromWallet}
+              onImport={(b64) => {
+                const k = importSecret(net, me, b64)
+                storeKeys(net, me, k, 'local')
+                setKeys(k)
+                setSource('local')
+                setPublishedKey((p) => (p && samePub(p, k.publicKey) ? p : null))
+              }}
+              onClose={() => setShowKeys(false)}
+            />
+          </div>
+        </div>
       )}
 
       {!me ? (
-        <Landing linkTarget={linkTarget} />
+        <Landing linkTarget={linkTarget} onConnect={() => setShowConnect(true)} />
       ) : (
         <main className={`layout ${selected ? 'thread-open' : ''}`}>
           <aside>
-            <form
-              className="newpeer"
-              onSubmit={(e) => {
-                e.preventDefault()
-                void openConversation(newPeer)
-              }}
-            >
-              <input placeholder="Address or name.algo…" value={newPeer} onChange={(e) => setNewPeer(e.target.value)} />
-              <button type="submit" disabled={!!busy}>
-                New
-              </button>
-            </form>
+            <button className="primary block" onClick={() => setShowNew(true)}>
+              ✎ New message
+            </button>
             {threads.length > 3 && <input className="search" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />}
-            {mailbox.loading && threads.length === 0 && <div className="muted">Loading mailbox…</div>}
-            {!mailbox.loading && threads.length === 0 && <div className="muted">No conversations yet.</div>}
+            {mailbox.loading && threads.length === 0 && <div className="muted pad">Loading your mailbox…</div>}
+            {!mailbox.loading && threads.length === 0 && (
+              <div className="muted pad">
+                No conversations yet. Start one, or share your link so someone can message you.
+              </div>
+            )}
             {requests.length > 0 && (
               <button className="section" onClick={() => setShowRequests((v) => !v)}>
                 {showRequests ? '▾' : '▸'} Requests <span className="badge">{requests.length}</span>
@@ -518,33 +549,21 @@ export default function App() {
               </details>
             )}
           </aside>
-
           <section className="chat">
             {!selected ? (
               <div className="center">
-                <div className="checklist">
-                  <h2>Getting set up</h2>
-                  <Step done>Wallet connected as {name(me)}</Step>
-                  <Step done={balance.micro !== null && balance.micro >= BigInt(MIN_BALANCE)}>
-                    Funded — every message costs the 0.001 ALGO network fee
-                    {balance.micro !== null && balance.micro < BigInt(MIN_BALANCE) && NETWORKS[net].dispenser && (
-                      <>
-                        {' '}
-                        <a href={NETWORKS[net].dispenser} target="_blank" rel="noreferrer">
-                          Get TestNet ALGO
-                        </a>
-                      </>
-                    )}
-                  </Step>
-                  <Step done={!!publishedKey && !!keys && samePub(publishedKey, keys.publicKey)}>Encryption key published, so people can write to you privately</Step>
-                  <Step done={threads.length > 0}>
-                    First conversation — paste an address or <code>name.algo</code>, or{' '}
-                    <button className="link" onClick={() => setShowShare(true)}>
-                      share your link
-                    </button>{' '}
-                    so someone can message you
-                  </Step>
-                </div>
+                <SetupGuide
+                  net={net}
+                  me={me}
+                  balance={balance.micro}
+                  keyPublished={!!publishedKey && !!keys && samePub(publishedKey, keys.publicKey)}
+                  hasChats={threads.some((t) => t.relation === 'contact')}
+                  testMnemonic={testMnemonic}
+                  busy={!!busy}
+                  onPublish={() => void onPublishKey()}
+                  onNewChat={() => setShowNew(true)}
+                  onShare={() => setShowShare(true)}
+                />
               </div>
             ) : (
               <Thread
@@ -579,11 +598,11 @@ export default function App() {
   )
 }
 
-function Step({ done, children }: { done: boolean; children: ReactNode }) {
-  return (
-    <div className={`step ${done ? 'done' : ''}`}>
-      <span className="tick">{done ? '✓' : '○'}</span>
-      <span>{children}</span>
-    </div>
-  )
+function ago(unix: number) {
+  const d = Date.now() / 1000 - unix
+  if (d < 60) return 'now'
+  if (d < 3600) return `${Math.floor(d / 60)}m`
+  if (d < 86400) return `${Math.floor(d / 3600)}h`
+  if (d < 7 * 86400) return `${Math.floor(d / 86400)}d`
+  return new Date(unix * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }

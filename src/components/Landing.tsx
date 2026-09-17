@@ -1,16 +1,26 @@
 import { NetworkId } from '@txnlab/use-wallet'
 import { NETWORKS } from '../lib/config'
 
-export function Landing({ linkTarget }: { linkTarget: string | null }) {
+export function Landing({ linkTarget, onConnect }: { linkTarget: string | null; onConnect: () => void }) {
   return (
     <main className="landing">
-      {linkTarget && <div className="banner warn">Connect a wallet above to message {linkTarget}.</div>}
+      {linkTarget && (
+        <div className="banner warn">
+          Someone shared their link with you. Connect a wallet to message <b>{linkTarget}</b>.
+        </div>
+      )}
       <section className="hero">
         <h1>Messages that live on Algorand</h1>
         <p className="lede">
           Every message is a 0-ALGO transaction with the text in its note, end-to-end encrypted with NaCl. There is no
           server to trust, subpoena, or shut down — the chain is the mailbox, and your wallet is your login.
         </p>
+        <div className="row wrap cta">
+          <button className="primary big" onClick={onConnect}>
+            Connect wallet
+          </button>
+          <span className="muted small">or try it free on TestNet — no wallet needed</span>
+        </div>
       </section>
 
       <section className="grid3">

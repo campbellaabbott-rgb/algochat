@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { algodFor, type NetId } from '../lib/config'
+import { MIN_BALANCE, algodFor, type NetId } from '../lib/config'
 
-/** Spendable microalgos for the connected account; refetch after anything that costs a fee. */
+/**
+ * Spendable microalgos for the connected account. Polls fast while the
+ * account is unfunded (someone is probably waiting on a dispenser), slowly
+ * once it has a balance; refetch after anything that costs a fee.
+ */
 export function useBalance(net: NetId, me: string | null) {
   const [micro, setMicro] = useState<bigint | null>(null)
   const refresh = useCallback(async () => {
-    if (!me) return setMicro(null)
+    if (!me) return
     try {
       const info = await algodFor(net).accountInformation(me).do()
       setMicro(info.amount)
@@ -14,9 +18,15 @@ export function useBalance(net: NetId, me: string | null) {
     }
   }, [net, me])
   useEffect(() => {
+    setMicro(null)
+    if (!me) return
     void refresh()
-    const t = setInterval(refresh, 30_000)
+  }, [me, refresh])
+  useEffect(() => {
+    if (!me) return
+    const fast = micro === null || micro < BigInt(MIN_BALANCE)
+    const t = setInterval(refresh, fast ? 5_000 : 30_000)
     return () => clearInterval(t)
-  }, [refresh])
+  }, [me, micro, refresh])
   return { micro, refresh }
 }
